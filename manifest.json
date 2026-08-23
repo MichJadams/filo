@@ -1,0 +1,9 @@
+{
+  "id": "filo",
+  "name": "Filo",
+  "version": "1.0.0",
+  "minAppVersion": "1.4.0",
+  "description": "File-based todos: every task is its own markdown file, with time tracking, a filter DSL, and canvas import.",
+  "author": "Filo",
+  "isDesktopOnly": false
+}

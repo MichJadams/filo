@@ -1,0 +1,354 @@
+/* ---- t-add ---- */
+.filo-add {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-secondary);
+}
+.filo-add-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.filo-add input,
+.filo-add select {
+  padding: 4px 6px;
+}
+.filo-add-title {
+  font-weight: 600;
+}
+.filo-add-tags {
+  flex: 1 1 160px;
+}
+.filo-add-btn {
+  align-self: flex-start;
+}
+.filo-add-recur {
+  align-items: center;
+}
+.filo-add-recur-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+.filo-add-cron {
+  flex: 1 1 140px;
+}
+
+/* ---- t-list ---- */
+.filo-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.filo-error {
+  color: var(--text-error);
+  font-size: 0.85em;
+}
+.filo-empty {
+  color: var(--text-muted);
+  font-style: italic;
+}
+.filo-group-header {
+  font-weight: 700;
+  margin-top: 8px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.filo-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.filo-row {
+  /* Columns: status · add-child · title · priority · due · tags · time · timer */
+  display: grid;
+  grid-template-columns: auto auto 1fr auto auto auto auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px;
+  border-radius: 6px;
+}
+.filo-row:hover {
+  background: var(--background-modifier-hover);
+}
+.filo-status {
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  font-size: 1.1em;
+  padding: 0 4px;
+}
+.filo-status-done {
+  color: var(--text-success, var(--text-muted));
+}
+.filo-title {
+  cursor: pointer;
+}
+.filo-recurring {
+  color: var(--text-accent);
+  cursor: help;
+}
+.filo-status-done + .filo-title {
+  text-decoration: line-through;
+  color: var(--text-muted);
+}
+/* Editable priority cell. Sized for 2-3 digits plus a sign. */
+.filo-priority {
+  width: 3.6em;
+  padding: 1px 4px;
+  font-size: 0.85em;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+}
+.filo-row:hover .filo-priority {
+  border-color: var(--background-modifier-border);
+}
+.filo-priority:focus {
+  color: var(--text-normal);
+  border-color: var(--interactive-accent);
+  background: var(--background-primary);
+}
+.filo-due {
+  font-size: 0.85em;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.filo-overdue {
+  color: var(--text-error);
+  font-weight: 600;
+}
+.filo-tags {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.filo-tag {
+  font-size: 0.75em;
+  background: var(--background-modifier-border);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+.filo-time {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.85em;
+  color: var(--text-muted);
+  white-space: nowrap;
+  min-width: 56px;
+  text-align: right;
+}
+.filo-flagged {
+  color: var(--text-error);
+  font-weight: 700;
+}
+.filo-timer {
+  cursor: pointer;
+  white-space: nowrap;
+}
+.filo-timer.filo-running {
+  color: var(--text-on-accent);
+  background: var(--interactive-accent);
+}
+.filo-add-child {
+  cursor: pointer;
+  font-weight: 700;
+  line-height: 1;
+  padding: 2px 8px;
+}
+
+/* Inline "new child" form, revealed below a row. */
+.filo-child-form {
+  display: none;
+  gap: 6px;
+  padding: 4px 4px 6px 32px; /* indent under the status column */
+  align-items: center;
+}
+.filo-child-form.is-open {
+  display: flex;
+}
+.filo-child-input {
+  flex: 1 1 220px;
+  padding: 4px 6px;
+}
+
+/* ---- t-time ---- */
+.filo-time-block {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-secondary);
+  padding: 8px 10px;
+}
+.filo-time-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.filo-time-total {
+  font-variant-numeric: tabular-nums;
+  font-size: 1.3em;
+  font-weight: 600;
+}
+.filo-time-state {
+  font-size: 0.85em;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.filo-time-state.filo-running {
+  color: var(--text-accent);
+}
+.filo-time-controls {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+.filo-time-controls button {
+  cursor: pointer;
+  white-space: nowrap;
+}
+.filo-time-controls button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+.filo-time-stop.filo-running {
+  color: var(--text-on-accent);
+  background: var(--interactive-accent);
+}
+.filo-time-sessions {
+  margin-top: 6px;
+  font-size: 0.85em;
+  color: var(--text-muted);
+}
+.filo-time-sessions summary {
+  cursor: pointer;
+}
+.filo-time-sessions ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* In-file (note header) start/stop timer action button. */
+.filo-file-timer.filo-running {
+  color: var(--text-accent);
+}
+
+/* ---- parent banner on task notes ---- */
+.filo-parent-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  font-size: 0.85em;
+}
+.filo-parent-label {
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.85em;
+}
+.filo-parent-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  cursor: pointer;
+  padding: 2px 6px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-normal);
+  font-size: inherit;
+}
+.filo-parent-value:hover {
+  border-color: var(--background-modifier-border);
+  background: var(--background-modifier-hover);
+}
+.filo-parent-value.filo-parent-none {
+  color: var(--text-muted);
+  font-style: italic;
+}
+.filo-parent-value.filo-parent-broken {
+  color: var(--text-error);
+}
+.filo-parent-open {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  padding: 2px 6px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+}
+.filo-parent-open:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+
+/* ---- inline `/t` task reference dropdown ---- */
+.filo-suggest-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.filo-suggest-main {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.filo-suggest-status {
+  color: var(--text-muted);
+}
+.filo-suggest-status-done {
+  color: var(--text-success, var(--text-muted));
+}
+.filo-suggest-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.filo-suggest-status-done + .filo-suggest-title {
+  text-decoration: line-through;
+  color: var(--text-muted);
+}
+.filo-suggest-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding-left: 20px; /* align under the title, past the status glyph */
+  font-size: 0.75em;
+  color: var(--text-muted);
+}
+.filo-suggest-mtime {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Bottom status-bar "current task" indicator. */
+.filo-status-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+.filo-status-item .filo-status-icon {
+  display: inline-flex;
+  align-items: center;
+}
+.filo-status-item.filo-running {
+  color: var(--text-accent);
+}

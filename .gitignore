@@ -1,0 +1,4 @@
+node_modules/
+
+# Local plugin state (per-install, not source)
+data.json
