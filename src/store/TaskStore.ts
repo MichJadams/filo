@@ -26,6 +26,15 @@ const FM_RE = /^---\r?\n([\s\S]*?)\r?\n---/;
 
 const STATUSES: TaskStatus[] = ["undone", "in-progress", "done"];
 
+/**
+ * Flatten a title onto a single line so it can sit after `# ` without the tail
+ * spilling out of the heading. Falls back to "Untitled" for a blank title.
+ */
+function headingLine(title: string): string {
+  const flat = (title ?? "").replace(/\s+/g, " ").trim();
+  return flat || "Untitled";
+}
+
 export class TaskStore {
   private app: App;
   private data: FiloDataAccess;
@@ -229,9 +238,13 @@ export class TaskStore {
     }
 
     const body = (input.body ?? "").trim();
+    // The filename is the opaque id, so the plain-language title is repeated as
+    // an H1 — otherwise a note with hidden properties shows nothing readable.
+    const heading = headingLine(input.title);
     // stringifyYaml already terminates with a newline.
     const content =
       `---\n${stringifyYaml(fm)}---\n\n` +
+      `# ${heading}\n\n` +
       (body ? body + "\n\n" : "") +
       "```t-time\n```\n" +
       (input.recurring ? "\n" + logSectionTemplate() : "");

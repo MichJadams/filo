@@ -359,6 +359,10 @@ function appendLogEntry(content, date, status) {
 // src/store/TaskStore.ts
 var FM_RE = /^---\r?\n([\s\S]*?)\r?\n---/;
 var STATUSES = ["undone", "in-progress", "done"];
+function headingLine(title) {
+  const flat = (title != null ? title : "").replace(/\s+/g, " ").trim();
+  return flat || "Untitled";
+}
 var TaskStore = class {
   constructor(app, data) {
     /**
@@ -529,8 +533,11 @@ var TaskStore = class {
       fm.lastReset = created;
     }
     const body = ((_f = input.body) != null ? _f : "").trim();
+    const heading = headingLine(input.title);
     const content = `---
 ${(0, import_obsidian2.stringifyYaml)(fm)}---
+
+# ${heading}
 
 ` + (body ? body + "\n\n" : "") + "```t-time\n```\n" + (input.recurring ? "\n" + logSectionTemplate() : "");
     const path = `${folder}/${id}.md`;
