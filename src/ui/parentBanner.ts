@@ -1,7 +1,33 @@
-import { App, FuzzySuggestModal, MarkdownView, Notice, setIcon } from "obsidian";
+import { App, FuzzySuggestModal, MarkdownView, Menu, Notice, setIcon } from "obsidian";
 import type FiloPlugin from "../main";
 import { Task } from "../types";
 import { byRecentlyModified } from "../store/mtime";
+
+/** Menu icon per status, so a child's state is readable in the dropdown. */
+const STATUS_MENU_ICON: Record<Task["status"], string> = {
+  undone: "circle",
+  "in-progress": "circle-dot",
+  done: "check-circle",
+};
+
+/** Status toggle cycle, matching the t-list row button. */
+const NEXT_STATUS: Record<Task["status"], Task["status"]> = {
+  undone: "in-progress",
+  "in-progress": "done",
+  done: "undone",
+};
+
+/** Readable status names for the banner toggle's label and tooltip. */
+const STATUS_LABEL: Record<Task["status"], string> = {
+  undone: "Undone",
+  "in-progress": "In progress",
+  done: "Done",
+};
+
+/** Every status class the toggle can carry, cleared before the current one is set. */
+const STATUS_CLASSES = (Object.keys(STATUS_LABEL) as Task["status"][]).map(
+  (s) => `filo-banner-status-${s}`
+);
 
 /**
  * One entry in the parent picker. `task === null` is the "clear the parent"
@@ -39,8 +65,13 @@ class ParentPickerModal extends FuzzySuggestModal<ParentChoice> {
 interface BannerRecord {
   taskId: string;
   el: HTMLElement;
+  statusEl: HTMLElement;
+  statusIconEl: HTMLElement;
+  statusTextEl: HTMLElement;
   valueEl: HTMLElement;
   openEl: HTMLElement;
+  childrenEl: HTMLElement;
+  childCountEl: HTMLElement;
 }
 
 /**
@@ -69,6 +100,13 @@ export class ParentBannerManager {
     const tasks = await this.plugin.store.listTasks();
     const byPath = new Map(tasks.map((t) => [t.path, t]));
     const byId = new Map(tasks.map((t) => [t.id, t]));
+    const byParent = new Map<string, Task[]>();
+    for (const t of tasks) {
+      if (!t.parent) continue;
+      const arr = byParent.get(t.parent) ?? [];
+      arr.push(t);
+      byParent.set(t.parent, arr);
+    }
 
     const live = new Set<MarkdownView>();
     for (const leaf of this.plugin.app.workspace.getLeavesOfType("markdown")) {
@@ -89,7 +127,7 @@ export class ParentBannerManager {
       // Switching between reading and editing mode can swap out the view's
       // content, taking the banner with it; re-attach when that happens.
       if (!active.el.isConnected) view.contentEl.prepend(active.el);
-      this.refresh(active, task, byId);
+      this.refresh(active, task, byId, byParent.get(task.id) ?? []);
     }
 
     for (const view of Array.from(this.records.keys())) {
@@ -108,6 +146,15 @@ export class ParentBannerManager {
 
   private addBanner(view: MarkdownView, task: Task): BannerRecord {
     const el = createDiv({ cls: "filo-parent-banner" });
+
+    // Status toggle — cycles undone -> in-progress -> done -> undone, matching
+    // the t-list row button. First in the banner so the task's own state reads
+    // before its parent's title.
+    const statusEl = el.createEl("button", { cls: "filo-banner-status" });
+    const statusIconEl = statusEl.createSpan({ cls: "filo-banner-status-icon" });
+    const statusTextEl = statusEl.createSpan({ cls: "filo-banner-status-text" });
+    statusEl.addEventListener("click", () => void this.cycleStatus(task.id));
+
     el.createSpan({ cls: "filo-parent-label", text: "Parent" });
 
     // The task id is captured here; current data is re-read at click time so
@@ -120,9 +167,25 @@ export class ParentBannerManager {
     openEl.setAttribute("aria-label", "Open parent task");
     openEl.addEventListener("click", () => void this.goToParent(task.id));
 
+    const childrenEl = el.createEl("button", { cls: "filo-parent-children" });
+    const childIconEl = childrenEl.createSpan({ cls: "filo-parent-children-icon" });
+    setIcon(childIconEl, "list-tree");
+    const childCountEl = childrenEl.createSpan({ cls: "filo-parent-children-count" });
+    childrenEl.addEventListener("click", (evt) => void this.openChildMenu(task.id, evt));
+
     view.contentEl.prepend(el);
 
-    const rec: BannerRecord = { taskId: task.id, el, valueEl, openEl };
+    const rec: BannerRecord = {
+      taskId: task.id,
+      el,
+      statusEl,
+      statusIconEl,
+      statusTextEl,
+      valueEl,
+      openEl,
+      childrenEl,
+      childCountEl,
+    };
     this.records.set(view, rec);
     return rec;
   }
@@ -132,8 +195,26 @@ export class ParentBannerManager {
     this.records.delete(view);
   }
 
-  private refresh(rec: BannerRecord, task: Task, byId: Map<string, Task>): void {
+  private refresh(
+    rec: BannerRecord,
+    task: Task,
+    byId: Map<string, Task>,
+    children: Task[]
+  ): void {
     const parent = task.parent ? byId.get(task.parent) : undefined;
+
+    // Status toggle: icon + label show the current status, the class carries the
+    // color, and the tooltip names what a click will do next.
+    rec.statusEl.removeClass(...STATUS_CLASSES);
+    rec.statusEl.addClass(`filo-banner-status-${task.status}`);
+    rec.statusIconEl.empty();
+    setIcon(rec.statusIconEl, STATUS_MENU_ICON[task.status]);
+    rec.statusTextEl.setText(STATUS_LABEL[task.status]);
+    rec.statusEl.setAttribute(
+      "aria-label",
+      `Status: ${STATUS_LABEL[task.status]} — click to mark ` +
+        STATUS_LABEL[NEXT_STATUS[task.status]].toLowerCase()
+    );
 
     if (parent) {
       rec.valueEl.setText(parent.title);
@@ -155,6 +236,63 @@ export class ParentBannerManager {
     }
 
     rec.openEl.toggle(!!parent);
+
+    // Only parent tasks get the subtask dropdown; leaves have nothing to list.
+    rec.childrenEl.toggle(children.length > 0);
+    rec.childCountEl.setText(String(children.length));
+    rec.childrenEl.setAttribute(
+      "aria-label",
+      children.length === 1 ? "1 subtask" : `${children.length} subtasks`
+    );
+  }
+
+  /**
+   * Advance the task one step around the status cycle. The status is re-read at
+   * click time (rather than taken from the rendered banner) so a banner that
+   * hasn't refreshed yet can't write a value based on a stale status.
+   */
+  private async cycleStatus(taskId: string): Promise<void> {
+    const task = await this.plugin.store.getTask(taskId);
+    if (!task) return;
+    try {
+      await this.plugin.store.setStatus(taskId, NEXT_STATUS[task.status]);
+    } catch (e) {
+      console.error("[Filo] failed to set status", e);
+      new Notice("Filo: failed to set status");
+    }
+  }
+
+  /**
+   * Drop down the task's direct children so a parent note can jump straight
+   * into any of them. Children are re-read at click time, and ordered undone
+   * first so the still-open work is nearest the cursor.
+   */
+  private async openChildMenu(taskId: string, evt: MouseEvent): Promise<void> {
+    const children = await this.plugin.store.getChildren(taskId);
+    if (!children.length) {
+      new Notice("Filo: no subtasks.");
+      return;
+    }
+
+    const order: Record<Task["status"], number> = {
+      undone: 0,
+      "in-progress": 1,
+      done: 2,
+    };
+    const sorted = children
+      .slice()
+      .sort((a, b) => order[a.status] - order[b.status] || a.title.localeCompare(b.title));
+
+    const menu = new Menu();
+    for (const child of sorted) {
+      menu.addItem((item) =>
+        item
+          .setTitle(child.title)
+          .setIcon(STATUS_MENU_ICON[child.status])
+          .onClick(() => void this.plugin.openTaskFile(child))
+      );
+    }
+    menu.showAtMouseEvent(evt);
   }
 
   private async goToParent(taskId: string): Promise<void> {

@@ -1070,6 +1070,7 @@ var ListWidget = class extends import_obsidian4.MarkdownRenderChild {
     el.addClass("filo-list");
     this.timeEls.clear();
     this.runningTasks = [];
+    this.renderToolbar(el);
     if (this.query.errors.length) {
       el.createEl("div", {
         cls: "filo-error",
@@ -1103,6 +1104,26 @@ var ListWidget = class extends import_obsidian4.MarkdownRenderChild {
       const rows = el.createDiv({ cls: "filo-rows" });
       this.renderTree(rows, tasks, cap, today);
     }
+  }
+  /**
+   * Block toolbar. Runs the same recurrence pass as the "Load tasks" command,
+   * which is otherwise only triggered at plugin load — so a long-running
+   * Obsidian session never resets a due recurring task on its own.
+   */
+  renderToolbar(container) {
+    const bar = container.createDiv({ cls: "filo-toolbar" });
+    const btn = bar.createEl("button", {
+      cls: "filo-load-tasks",
+      text: "\u27F3 Load tasks",
+      attr: { "aria-label": "Process recurring tasks now" }
+    });
+    btn.addEventListener("click", () => {
+      btn.disabled = true;
+      void this.plugin.runProcessRecurring(true).finally(() => {
+        if (btn.isConnected)
+          btn.disabled = false;
+      });
+    });
   }
   /**
    * Render the matched tasks as a nested tree: children sit (indented) beneath
@@ -1820,6 +1841,24 @@ var TaskLinkSuggest = class extends import_obsidian10.EditorSuggest {
 
 // src/ui/parentBanner.ts
 var import_obsidian11 = require("obsidian");
+var STATUS_MENU_ICON = {
+  undone: "circle",
+  "in-progress": "circle-dot",
+  done: "check-circle"
+};
+var NEXT_STATUS2 = {
+  undone: "in-progress",
+  "in-progress": "done",
+  done: "undone"
+};
+var STATUS_LABEL = {
+  undone: "Undone",
+  "in-progress": "In progress",
+  done: "Done"
+};
+var STATUS_CLASSES = Object.keys(STATUS_LABEL).map(
+  (s) => `filo-banner-status-${s}`
+);
 var ParentPickerModal = class extends import_obsidian11.FuzzySuggestModal {
   constructor(app, choices, onChoose) {
     super(app);
@@ -1844,6 +1883,7 @@ var ParentBannerManager = class {
   }
   /** Re-sync banners across all open markdown leaves. */
   async update() {
+    var _a, _b;
     if (!this.plugin.settings.parentBanner) {
       this.destroy();
       return;
@@ -1851,6 +1891,14 @@ var ParentBannerManager = class {
     const tasks = await this.plugin.store.listTasks();
     const byPath = new Map(tasks.map((t) => [t.path, t]));
     const byId = new Map(tasks.map((t) => [t.id, t]));
+    const byParent = /* @__PURE__ */ new Map();
+    for (const t of tasks) {
+      if (!t.parent)
+        continue;
+      const arr = (_a = byParent.get(t.parent)) != null ? _a : [];
+      arr.push(t);
+      byParent.set(t.parent, arr);
+    }
     const live = /* @__PURE__ */ new Set();
     for (const leaf of this.plugin.app.workspace.getLeavesOfType("markdown")) {
       const view = leaf.view;
@@ -1867,7 +1915,7 @@ var ParentBannerManager = class {
       const active = rec && rec.taskId === task.id ? rec : this.replaceRecord(view, rec, task);
       if (!active.el.isConnected)
         view.contentEl.prepend(active.el);
-      this.refresh(active, task, byId);
+      this.refresh(active, task, byId, (_b = byParent.get(task.id)) != null ? _b : []);
     }
     for (const view of Array.from(this.records.keys())) {
       if (!live.has(view))
@@ -1881,6 +1929,10 @@ var ParentBannerManager = class {
   }
   addBanner(view, task) {
     const el = createDiv({ cls: "filo-parent-banner" });
+    const statusEl = el.createEl("button", { cls: "filo-banner-status" });
+    const statusIconEl = statusEl.createSpan({ cls: "filo-banner-status-icon" });
+    const statusTextEl = statusEl.createSpan({ cls: "filo-banner-status-text" });
+    statusEl.addEventListener("click", () => void this.cycleStatus(task.id));
     el.createSpan({ cls: "filo-parent-label", text: "Parent" });
     const valueEl = el.createEl("button", { cls: "filo-parent-value" });
     valueEl.addEventListener("click", () => void this.openPicker(task.id));
@@ -1888,8 +1940,23 @@ var ParentBannerManager = class {
     (0, import_obsidian11.setIcon)(openEl, "corner-left-up");
     openEl.setAttribute("aria-label", "Open parent task");
     openEl.addEventListener("click", () => void this.goToParent(task.id));
+    const childrenEl = el.createEl("button", { cls: "filo-parent-children" });
+    const childIconEl = childrenEl.createSpan({ cls: "filo-parent-children-icon" });
+    (0, import_obsidian11.setIcon)(childIconEl, "list-tree");
+    const childCountEl = childrenEl.createSpan({ cls: "filo-parent-children-count" });
+    childrenEl.addEventListener("click", (evt) => void this.openChildMenu(task.id, evt));
     view.contentEl.prepend(el);
-    const rec = { taskId: task.id, el, valueEl, openEl };
+    const rec = {
+      taskId: task.id,
+      el,
+      statusEl,
+      statusIconEl,
+      statusTextEl,
+      valueEl,
+      openEl,
+      childrenEl,
+      childCountEl
+    };
     this.records.set(view, rec);
     return rec;
   }
@@ -1897,8 +1964,17 @@ var ParentBannerManager = class {
     rec.el.remove();
     this.records.delete(view);
   }
-  refresh(rec, task, byId) {
+  refresh(rec, task, byId, children) {
     const parent = task.parent ? byId.get(task.parent) : void 0;
+    rec.statusEl.removeClass(...STATUS_CLASSES);
+    rec.statusEl.addClass(`filo-banner-status-${task.status}`);
+    rec.statusIconEl.empty();
+    (0, import_obsidian11.setIcon)(rec.statusIconEl, STATUS_MENU_ICON[task.status]);
+    rec.statusTextEl.setText(STATUS_LABEL[task.status]);
+    rec.statusEl.setAttribute(
+      "aria-label",
+      `Status: ${STATUS_LABEL[task.status]} \u2014 click to mark ` + STATUS_LABEL[NEXT_STATUS2[task.status]].toLowerCase()
+    );
     if (parent) {
       rec.valueEl.setText(parent.title);
       rec.valueEl.removeClass("filo-parent-none", "filo-parent-broken");
@@ -1915,6 +1991,53 @@ var ParentBannerManager = class {
       rec.valueEl.setAttribute("aria-label", "Set parent task");
     }
     rec.openEl.toggle(!!parent);
+    rec.childrenEl.toggle(children.length > 0);
+    rec.childCountEl.setText(String(children.length));
+    rec.childrenEl.setAttribute(
+      "aria-label",
+      children.length === 1 ? "1 subtask" : `${children.length} subtasks`
+    );
+  }
+  /**
+   * Advance the task one step around the status cycle. The status is re-read at
+   * click time (rather than taken from the rendered banner) so a banner that
+   * hasn't refreshed yet can't write a value based on a stale status.
+   */
+  async cycleStatus(taskId) {
+    const task = await this.plugin.store.getTask(taskId);
+    if (!task)
+      return;
+    try {
+      await this.plugin.store.setStatus(taskId, NEXT_STATUS2[task.status]);
+    } catch (e) {
+      console.error("[Filo] failed to set status", e);
+      new import_obsidian11.Notice("Filo: failed to set status");
+    }
+  }
+  /**
+   * Drop down the task's direct children so a parent note can jump straight
+   * into any of them. Children are re-read at click time, and ordered undone
+   * first so the still-open work is nearest the cursor.
+   */
+  async openChildMenu(taskId, evt) {
+    const children = await this.plugin.store.getChildren(taskId);
+    if (!children.length) {
+      new import_obsidian11.Notice("Filo: no subtasks.");
+      return;
+    }
+    const order = {
+      undone: 0,
+      "in-progress": 1,
+      done: 2
+    };
+    const sorted = children.slice().sort((a, b) => order[a.status] - order[b.status] || a.title.localeCompare(b.title));
+    const menu = new import_obsidian11.Menu();
+    for (const child of sorted) {
+      menu.addItem(
+        (item) => item.setTitle(child.title).setIcon(STATUS_MENU_ICON[child.status]).onClick(() => void this.plugin.openTaskFile(child))
+      );
+    }
+    menu.showAtMouseEvent(evt);
   }
   async goToParent(taskId) {
     const task = await this.plugin.store.getTask(taskId);
@@ -2204,7 +2327,8 @@ var FiloPlugin = class extends import_obsidian13.Plugin {
   }
   /**
    * Reset due recurring tasks. `announce` controls whether a Notice is shown
-   * (true for the explicit command, false for the silent on-load pass).
+   * (true for the explicit command and the t-list button, false for the silent
+   * on-load pass).
    */
   async runProcessRecurring(announce) {
     try {

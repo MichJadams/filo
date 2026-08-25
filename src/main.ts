@@ -138,9 +138,10 @@ export default class FiloPlugin extends Plugin implements FiloDataAccess {
 
   /**
    * Reset due recurring tasks. `announce` controls whether a Notice is shown
-   * (true for the explicit command, false for the silent on-load pass).
+   * (true for the explicit command and the t-list button, false for the silent
+   * on-load pass).
    */
-  private async runProcessRecurring(announce: boolean): Promise<void> {
+  async runProcessRecurring(announce: boolean): Promise<void> {
     try {
       const count = await this.store.processRecurring();
       if (announce) {

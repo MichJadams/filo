@@ -93,6 +93,10 @@ export class ListWidget extends MarkdownRenderChild {
     this.timeEls.clear();
     this.runningTasks = [];
 
+    // Rendered before the empty/error branches so the button is reachable even
+    // when nothing matches the query.
+    this.renderToolbar(el);
+
     if (this.query.errors.length) {
       el.createEl("div", {
         cls: "filo-error",
@@ -129,6 +133,28 @@ export class ListWidget extends MarkdownRenderChild {
       const rows = el.createDiv({ cls: "filo-rows" });
       this.renderTree(rows, tasks, cap, today);
     }
+  }
+
+  /**
+   * Block toolbar. Runs the same recurrence pass as the "Load tasks" command,
+   * which is otherwise only triggered at plugin load — so a long-running
+   * Obsidian session never resets a due recurring task on its own.
+   */
+  private renderToolbar(container: HTMLElement): void {
+    const bar = container.createDiv({ cls: "filo-toolbar" });
+    const btn = bar.createEl("button", {
+      cls: "filo-load-tasks",
+      text: "⟳ Load tasks",
+      attr: { "aria-label": "Process recurring tasks now" },
+    });
+    btn.addEventListener("click", () => {
+      btn.disabled = true;
+      // A reset invalidates the store, which re-renders this block and replaces
+      // the button; only re-enable if this element survived (nothing was due).
+      void this.plugin.runProcessRecurring(true).finally(() => {
+        if (btn.isConnected) btn.disabled = false;
+      });
+    });
   }
 
   /**

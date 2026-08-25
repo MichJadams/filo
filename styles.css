@@ -297,6 +297,28 @@
   color: var(--text-normal);
   background: var(--background-modifier-hover);
 }
+.filo-parent-children {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  padding: 2px 6px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+  font-size: inherit;
+}
+.filo-parent-children:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+.filo-parent-children-icon {
+  display: inline-flex;
+  align-items: center;
+}
+.filo-parent-children-count {
+  font-variant-numeric: tabular-nums;
+}
 
 /* ---- inline `/t` task reference dropdown ---- */
 .filo-suggest-item {
@@ -351,4 +373,49 @@
 }
 .filo-status-item.filo-running {
   color: var(--text-accent);
+}
+
+/* --- t-list toolbar ------------------------------------------------------- */
+.filo-toolbar {
+  display: flex;
+  justify-content: flex-end;
+}
+.filo-load-tasks {
+  cursor: pointer;
+  font-size: 0.85em;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+.filo-load-tasks:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+/* --- banner status toggle ------------------------------------------------- */
+.filo-banner-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  padding: 2px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+  font-size: inherit;
+  white-space: nowrap;
+}
+.filo-banner-status:hover {
+  background: var(--background-modifier-hover);
+}
+.filo-banner-status-icon {
+  display: inline-flex;
+  align-items: center;
+}
+.filo-banner-status.filo-banner-status-in-progress {
+  color: var(--text-accent);
+}
+.filo-banner-status.filo-banner-status-done {
+  color: var(--text-success, var(--text-muted));
 }
