@@ -2,6 +2,82 @@ import { Task, TaskStatus } from "../types";
 
 export type SortField = "due" | "created" | "title" | "time" | "priority";
 
+/**
+ * A `time:` window, kept as a *spec* rather than dates because "today" has to be
+ * resolved when the block renders, not when it was typed.
+ */
+export type TimeWindowSpec =
+  | { kind: "days"; back: number } // rolling window ending today; 1 = today alone
+  | { kind: "on"; date: string }
+  | { kind: "between"; from: string; to: string };
+
+/** A resolved window, as inclusive `YYYY-MM-DD` bounds. */
+export interface TimeWindow {
+  from: string;
+  to: string;
+}
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Shift a `YYYY-MM-DD` by whole days. UTC math, so DST can't move a date. */
+function shiftDate(date: string, days: number): string {
+  const [y, m, d] = date.split("-").map(Number);
+  const t = new Date(Date.UTC(y, m - 1, d) + days * 86_400_000);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${t.getUTCFullYear()}-${pad(t.getUTCMonth() + 1)}-${pad(t.getUTCDate())}`;
+}
+
+/**
+ * Parse the value of a `time:` line. Returns null (and pushes an error) for
+ * anything unrecognized, so a typo shows up in the block instead of silently
+ * reporting the wrong span.
+ */
+export function parseTimeWindow(val: string, errors: string[]): TimeWindowSpec | null {
+  const v = val.trim().toLowerCase();
+
+  if (v === "today") return { kind: "days", back: 1 };
+  if (v === "yesterday") return { kind: "on", date: "yesterday" };
+  if (v === "week") return { kind: "days", back: 7 };
+  if (v === "month") return { kind: "days", back: 30 };
+
+  const rel = v.match(/^(\d+)d$/);
+  if (rel) {
+    const back = Number(rel[1]);
+    if (back >= 1) return { kind: "days", back };
+    errors.push(`bad time window: ${val}`);
+    return null;
+  }
+
+  const range = v.split("..").map((x) => x.trim());
+  if (range.length === 2) {
+    if (DATE_RE.test(range[0]) && DATE_RE.test(range[1])) {
+      const [from, to] = range[0] <= range[1] ? range : [range[1], range[0]];
+      return { kind: "between", from, to };
+    }
+    errors.push(`bad time range: ${val}`);
+    return null;
+  }
+
+  if (DATE_RE.test(v)) return { kind: "on", date: v };
+
+  errors.push(`bad time window: ${val}`);
+  return null;
+}
+
+/** Turn a spec into concrete inclusive dates, given the caller's local today. */
+export function resolveWindow(spec: TimeWindowSpec, today: string): TimeWindow {
+  switch (spec.kind) {
+    case "days":
+      return { from: shiftDate(today, -(spec.back - 1)), to: today };
+    case "on": {
+      const date = spec.date === "yesterday" ? shiftDate(today, -1) : spec.date;
+      return { from: date, to: date };
+    }
+    case "between":
+      return { from: spec.from, to: spec.to };
+  }
+}
+
 export interface ListQuery {
   /**
    * Status match. `values` is an OR-set (a task matches if its status is any of
@@ -12,6 +88,11 @@ export interface ListQuery {
   due?: { kind: "overdue" } | { kind: "cmp"; op: "<" | ">" | "="; date: string };
   /** OR-set of tags (a task matches if it has ANY of these). */
   tags?: string[];
+  /**
+   * Restricts the list to tasks worked on in this window, and scopes every time
+   * figure to it — the row totals, `sort: time`, and the summed footer.
+   */
+  time?: TimeWindowSpec;
   sort?: { field: SortField; dir: "asc" | "desc" };
   /**
    * `parent` buckets rows under their parent's title; `none` renders one flat
@@ -81,6 +162,12 @@ export function parseQuery(source: string): ListQuery {
         break;
       }
 
+      case "time": {
+        const spec = parseTimeWindow(val, q.errors);
+        if (spec) q.time = spec;
+        break;
+      }
+
       case "tags":
         q.tags = val
           .split(",")
@@ -116,7 +203,11 @@ export function parseQuery(source: string): ListQuery {
 }
 
 export interface QueryCtx {
-  /** Total tracked time for a task, used by `sort: time`. */
+  /**
+   * Tracked time for a task — scoped to the query's `time:` window when it has
+   * one. Drives both `sort: time` and the `time:` filter itself, so the two can
+   * never disagree about what "time" means.
+   */
   totalTime: (t: Task) => number;
   /** Today as YYYY-MM-DD, used by `overdue` and date comparisons. */
   today: string;
@@ -125,6 +216,10 @@ export interface QueryCtx {
 /** Filter + sort tasks per the parsed query. Date strings compare lexically (YYYY-MM-DD is chronological). */
 export function applyQuery(tasks: Task[], q: ListQuery, ctx: QueryCtx): Task[] {
   let out = tasks.filter((t) => {
+    // A window means "what did I work on then", so a task with no time in it
+    // isn't part of the answer.
+    if (q.time && ctx.totalTime(t) <= 0) return false;
+
     if (q.status) {
       const inSet = q.status.values.includes(t.status);
       if (q.status.not ? inSet : !inSet) return false;

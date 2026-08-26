@@ -131,7 +131,9 @@ When you open a task file, **task controls** appear in the note's top action bar
   time in its tooltip);
 - **go to parent task** (↖, shown only when the task has a parent);
 - **go to child task** (↘, shown only when the task has children — opens the
-  single child, or pops a menu to pick when there are several).
+  single child, or pops a menu to pick when there are several);
+- **open task canvas** (▦) — builds/refreshes an Obsidian Canvas holding this
+  task and its subtree, then opens it (see [Task canvas](#task-canvas)).
 
 They work in both reading and editing modes and stay in sync as tasks change.
 
@@ -202,6 +204,7 @@ The body is a simple line-based DSL (`key: value`, one per line; blank lines and
 | `status` | `status: undone`, `status: undone, in-progress`, `status: !done` | Status match. Comma = OR-set; a leading `!` negates (so `!done` = everything still open). |
 | `due`    | `due: <2026-06-30`, `due: >2026-01-01`, `due: =2026-06-30`, `due: overdue` | Date comparison with `<`, `>`, `=`; `overdue` = due before today and not done. |
 | `tags`   | `tags: backend, docs`                      | Matches if the task has **any** listed tag (comma = OR). |
+| `time`   | `time: today`, `time: yesterday`, `time: 7d`, `time: 2026-08-19`, `time: 2026-08-01..2026-08-25` | Keep only tasks **worked on** in that window, scope every time figure to it, and show a **summed total** under the list. See [Time reporting](#time-reporting). |
 | `sort`   | `sort: due asc`, `sort: time desc`, `sort: priority desc` | Sort by `due`, `created`, `title`, `time` (tracked time), or `priority`. `asc`/`desc` (default `asc`, so **`sort: priority desc` puts the highest priority first**). |
 | `group`  | `group: parent`, `group: none`             | `parent` buckets rows under their immediate parent's title; `none` (alias `flat`) drops the tree entirely and renders one list in pure `sort` order. Both are alternatives to the default tree. |
 
@@ -232,6 +235,53 @@ priority-ordered flat list:
 status: !done
 sort: priority desc
 group: none
+```
+````
+
+## Time reporting
+
+A `time:` line turns a `t-list` into a timesheet: the list keeps only tasks with
+tracked time in that window, each row's time column shows **time in the window**
+rather than the lifetime total, and a **total** is summed underneath.
+
+How long did I work today?
+
+````markdown
+```t-list
+time: today
+sort: time desc
+group: none
+```
+````
+
+Accepted windows:
+
+| Value | Span |
+|-------|------|
+| `today` / `yesterday` | That single day. |
+| `2026-08-19` | That single day. |
+| `7d`, `30d` | A rolling window of N days **ending today** (so `1d` = today). |
+| `week` / `month` | Aliases for `7d` / `30d` — rolling, not calendar. |
+| `2026-08-01..2026-08-25` | Between two dates, inclusive. Reversed bounds are accepted. |
+
+Details worth knowing:
+
+- **Days are local days**, midnight to midnight in the vault's timezone, and
+  sessions are **clipped** to the window — a session from 23:00 to 01:00 counts
+  an hour toward each of the two days rather than landing wholly in one.
+- A running timer is included up to *now* and keeps ticking live in the row and
+  the total — but only when the window contains now, so last week's report
+  doesn't move.
+- The usual safety cap still applies: a running session older than **Timer max
+  duration** contributes only the cap and is flagged.
+- `sort: time` sorts by windowed time too, so `sort: time desc` puts the day's
+  biggest sink on top.
+- Other filters still compose. Today's work on one project:
+
+````markdown
+```t-list
+time: today
+tags: backend
 ```
 ````
 
@@ -299,22 +349,86 @@ Details:
   active file is a task, with that task pre-selected as the parent.
 - **Filo: Load tasks (process recurring)** — scans recurring tasks and resets any
   whose cadence has elapsed (see **Recurring tasks** above).
-- **Filo: Import task tree to canvas** — see below.
+- **Filo: Open task canvas** — see below.
+- **Filo: Digest canvas into tasks** — only shown on a canvas; see below.
 
-## Canvas import
+## Task canvas
 
-Command palette → **Filo: Import task tree to canvas**.
+Press the **canvas button** in a task note's top action bar (next to the timer
+and the parent/child nav buttons), or run **Filo: Open task canvas** from the
+command palette.
 
-- If run from inside a task file, that task is the root; otherwise you're
-  prompted to pick one.
-- It walks the subtree (`parent → child`) and writes an Obsidian Canvas
-  (`<rootId>.canvas`) into the configured canvas folder, with `file` nodes
-  pointing at each task and edges from parent to child.
-- Layout is a simple tree: **depth → x axis**, sibling slot → y axis.
+- The button builds (or refreshes) the canvas for that task and opens it — in a
+  new tab, or by focusing and reloading the tab that already has it open.
+- From the command palette: if run from inside a task file that task is the
+  root; otherwise you're prompted to pick one.
+- It walks the subtree (`parent → child`) and writes an Obsidian Canvas into the
+  configured canvas folder, with `file` nodes pointing at each task note and
+  edges from parent to child. Editing a node edits the task note itself.
+- Layout is an **inverted tree**: the root on top, each generation in a row
+  below the last (**depth → y axis**), every parent centered over its children,
+  and edges running bottom → top.
+- Cards are **640 × 640** — roughly 80 characters across and down — so a task
+  note is readable on the board rather than a title-sized strip.
 - **Re-running updates the existing canvas:** nodes are matched by task id,
-  **manual positions are preserved**, only new nodes are auto-laid-out, removed
+  **manual positions are preserved**, only new nodes are auto-laid-out (nudged
+  down a row if a card you moved is already sitting in their slot), removed
   tasks are pruned, and colors are refreshed. Foreign (non-Filo) nodes/edges are
   left untouched.
+- Cards you resized by hand keep their size. Cards still at a size Filo itself
+  generated are bumped to the current default — and a canvas built entirely by
+  an older Filo (small cards, left-to-right layout) is **laid out afresh** the
+  first time it's opened, since the old spacing can't hold the bigger cards.
+
+### Editing tasks from the canvas
+
+A Filo canvas has a **digest button** (🌱) in its own action bar. Draw on the
+board, hit it, and the task tree is made to match:
+
+- **New text cards become tasks.** The first line is the title (a leading `#`,
+  `-` or `- [ ]` is stripped), the rest becomes the note's body. The task file is
+  created as `<tasksFolder>/<id>.md` like any other.
+- **Note cards are adopted.** A card pointing at an ordinary note gets Filo
+  frontmatter merged in (whatever it already had is kept), a `t-time` block, and
+  is **renamed** into the tasks folder as `<id>.md` — links to it are rewritten.
+- **Edges are parenthood.** A card hanging under another becomes that task's
+  child; a new card nothing points at becomes a child of the **canvas root**
+  (the task the canvas was built from). Drawing an edge between two *existing*
+  tasks re-parents the lower one, so you can restructure by dragging.
+- Everything else is left alone: groups, web links, images, PDFs, blank cards.
+
+Afterwards the canvas is rebuilt from the resulting tree, in place: new cards
+stay where you dropped them, now backed by real task notes and wired up with
+generated edges. Your hand-drawn edges are replaced by the canonical ones rather
+than doubled.
+
+Two deliberate limits:
+
+- **Deleting a card does not delete the task** — the rebuild simply puts the card
+  back. Removing tasks is left to the task files themselves, since a stray
+  delete on a canvas is far too easy.
+- An edge that would make a task its own ancestor is **refused**, and reported in
+  the summary as *skipped (would loop)*. So a card drawn above the root becomes a
+  child of the root rather than a new root.
+
+The button only appears on canvases that already hold a Filo task, since a
+digest needs a root to hang new cards from. Start one from a task note with the
+canvas button, then edit it freely.
+
+### Canvas file naming
+
+The canvas is named after the **task's title** (`Ship Filo v2.canvas`), with
+characters a file name can't hold replaced by spaces.
+
+Titles are neither stable nor unique, so the file is *looked up*, not just
+computed:
+
+- The canvas rooted at the task is found wherever it sits in the canvas folder —
+  including under the old `<taskId>.canvas` name — and is **renamed to follow
+  the title** when the task is renamed, so manual layout survives.
+- If that name is already taken by an unrelated canvas (e.g. two tasks share a
+  title), the id is appended: `Ship Filo v2 (t-k3p9af2x).canvas`. Filo never
+  merges task nodes into a canvas that isn't its own.
 
 ### Canvas color limitation
 
@@ -371,9 +485,11 @@ src/
     listProcessor.ts      t-list widget (live ticks, lifecycle cleanup)
     timeProcessor.ts      t-time widget (start/stop buttons, live total)
   ui/
-    fileTimerButton.ts    in-file start/stop timer action
+    fileTimerButton.ts    in-file timer, parent/child nav, canvas actions
+    canvasActions.ts      digest button on Filo canvases
     statusBar.ts          bottom-bar current-task indicator
     taskSuggest.ts        inline `/t` task-reference autocomplete
     parentBanner.ts       parent-by-title banner + cycle-safe parent picker
-  canvas/canvasImport.ts  subtree → canvas (position-preserving merge)
+  canvas/canvasImport.ts  subtree → canvas (title-named, position-preserving merge)
+  canvas/canvasDigest.ts  canvas → tasks (create/adopt cards, re-parent by edge)
 ```

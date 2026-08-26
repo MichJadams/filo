@@ -26,7 +26,7 @@ __export(main_exports, {
   default: () => FiloPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian13 = require("obsidian");
+var import_obsidian15 = require("obsidian");
 
 // src/settings.ts
 var import_obsidian = require("obsidian");
@@ -188,7 +188,7 @@ function writeSessions(content, sessions) {
   }
   return content.replace(/\s*$/, "") + "\n\n" + block + "\n";
 }
-function computeTotal(sessions, capMs, nowMs = Date.now()) {
+function computeTotalInRange(sessions, capMs, fromMs, toMs, nowMs = Date.now()) {
   let ms = 0;
   let flagged = false;
   let running = false;
@@ -196,22 +196,29 @@ function computeTotal(sessions, capMs, nowMs = Date.now()) {
     const start = Date.parse(s.start);
     if (isNaN(start))
       continue;
+    let stop;
     if (s.stop === null) {
-      running = true;
-      const elapsed = nowMs - start;
-      if (elapsed > capMs) {
-        flagged = true;
-        ms += capMs;
-      } else {
-        ms += Math.max(0, elapsed);
+      const capped = nowMs - start > capMs;
+      stop = capped ? start + capMs : nowMs;
+      if (start < toMs && stop > fromMs) {
+        running = true;
+        if (capped)
+          flagged = true;
       }
     } else {
-      const stop = Date.parse(s.stop);
-      if (!isNaN(stop))
-        ms += Math.max(0, stop - start);
+      stop = Date.parse(s.stop);
+      if (isNaN(stop))
+        continue;
     }
+    const a = Math.max(start, fromMs);
+    const b = Math.min(stop, toMs);
+    if (b > a)
+      ms += b - a;
   }
   return { ms, flagged, running };
+}
+function computeTotal(sessions, capMs, nowMs = Date.now()) {
+  return computeTotalInRange(sessions, capMs, -Infinity, Infinity, nowMs);
 }
 function formatDuration(ms) {
   const totalSec = Math.floor(ms / 1e3);
@@ -560,6 +567,64 @@ ${(0, import_obsidian2.stringifyYaml)(fm)}---
     };
   }
   /**
+   * Turn a note that already exists into a task, in place: Filo frontmatter is
+   * merged into whatever it already had, a `t-time` block is ensured, and the
+   * file is renamed to `<tasksFolder>/<id>.md` — the naming every other part of
+   * Filo relies on. `fileManager.renameFile` rewrites links pointing at it.
+   *
+   * Fields the note already carries (a `status`, a `due`) are kept; only what's
+   * missing is filled in. Used by the canvas digest to adopt note cards.
+   */
+  async adoptFile(file, input) {
+    var _a, _b;
+    const folder = this.folder();
+    await this.ensureFolder(folder);
+    const id = generateTaskId();
+    const created = new Date().toISOString();
+    const title = ((_a = input.title) == null ? void 0 : _a.trim()) || file.basename;
+    const content = await this.app.vault.read(file);
+    const withBlock = writeSessions(content, parseSessions(content));
+    if (withBlock !== content)
+      await this.app.vault.modify(file, withBlock);
+    await this.app.fileManager.processFrontMatter(file, (fm) => {
+      var _a2;
+      fm.id = id;
+      fm.title = title;
+      fm.parent = (_a2 = input.parent) != null ? _a2 : null;
+      fm.created = created;
+      if (fm.status == null)
+        fm.status = "undone";
+      if (fm.due === void 0)
+        fm.due = null;
+      if (fm.tags == null)
+        fm.tags = [];
+      if (fm.priority == null)
+        fm.priority = 0;
+    });
+    const path = `${folder}/${id}.md`;
+    if (file.path !== path)
+      await this.app.fileManager.renameFile(file, path);
+    this.invalidate();
+    const adopted = await this.getTask(id);
+    if (adopted)
+      return adopted;
+    return {
+      id,
+      title,
+      status: "undone",
+      parent: (_b = input.parent) != null ? _b : null,
+      due: null,
+      tags: [],
+      priority: 0,
+      created,
+      sessions: [],
+      path,
+      recurring: false,
+      cadence: null,
+      lastReset: null
+    };
+  }
+  /**
    * Update frontmatter fields via processFrontMatter (which mutates only the
    * YAML and preserves the body, rather than naive string replacement).
    */
@@ -864,6 +929,57 @@ var AddWidget = class extends import_obsidian3.MarkdownRenderChild {
 var import_obsidian4 = require("obsidian");
 
 // src/dsl/filter.ts
+var DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+function shiftDate(date, days) {
+  const [y, m, d] = date.split("-").map(Number);
+  const t = new Date(Date.UTC(y, m - 1, d) + days * 864e5);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${t.getUTCFullYear()}-${pad(t.getUTCMonth() + 1)}-${pad(t.getUTCDate())}`;
+}
+function parseTimeWindow(val, errors) {
+  const v = val.trim().toLowerCase();
+  if (v === "today")
+    return { kind: "days", back: 1 };
+  if (v === "yesterday")
+    return { kind: "on", date: "yesterday" };
+  if (v === "week")
+    return { kind: "days", back: 7 };
+  if (v === "month")
+    return { kind: "days", back: 30 };
+  const rel = v.match(/^(\d+)d$/);
+  if (rel) {
+    const back = Number(rel[1]);
+    if (back >= 1)
+      return { kind: "days", back };
+    errors.push(`bad time window: ${val}`);
+    return null;
+  }
+  const range = v.split("..").map((x) => x.trim());
+  if (range.length === 2) {
+    if (DATE_RE.test(range[0]) && DATE_RE.test(range[1])) {
+      const [from, to] = range[0] <= range[1] ? range : [range[1], range[0]];
+      return { kind: "between", from, to };
+    }
+    errors.push(`bad time range: ${val}`);
+    return null;
+  }
+  if (DATE_RE.test(v))
+    return { kind: "on", date: v };
+  errors.push(`bad time window: ${val}`);
+  return null;
+}
+function resolveWindow(spec, today) {
+  switch (spec.kind) {
+    case "days":
+      return { from: shiftDate(today, -(spec.back - 1)), to: today };
+    case "on": {
+      const date = spec.date === "yesterday" ? shiftDate(today, -1) : spec.date;
+      return { from: date, to: date };
+    }
+    case "between":
+      return { from: spec.from, to: spec.to };
+  }
+}
 var STATUSES2 = ["undone", "in-progress", "done"];
 var SORT_FIELDS = ["due", "created", "title", "time", "priority"];
 function parseQuery(source) {
@@ -910,6 +1026,12 @@ function parseQuery(source) {
         }
         break;
       }
+      case "time": {
+        const spec = parseTimeWindow(val, q.errors);
+        if (spec)
+          q.time = spec;
+        break;
+      }
       case "tags":
         q.tags = val.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
         break;
@@ -940,6 +1062,8 @@ function parseQuery(source) {
 }
 function applyQuery(tasks, q, ctx) {
   let out = tasks.filter((t) => {
+    if (q.time && ctx.totalTime(t) <= 0)
+      return false;
     if (q.status) {
       const inSet = q.status.values.includes(t.status);
       if (q.status.not ? inSet : !inSet)
@@ -1021,6 +1145,20 @@ function todayStr() {
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
 }
+function describeWindow(w, today) {
+  if (w.from !== w.to)
+    return `${w.from} \u2192 ${w.to}`;
+  if (w.from === today)
+    return "today";
+  return `on ${w.from}`;
+}
+function dayStartMs(date) {
+  const [y, m, d] = date.split("-").map(Number);
+  return new Date(y, m - 1, d).getTime();
+}
+function windowBounds(w) {
+  return { fromMs: dayStartMs(w.from), toMs: dayStartMs(w.to) + 864e5 };
+}
 var ListWidget = class extends import_obsidian4.MarkdownRenderChild {
   constructor(plugin, containerEl, source) {
     super(containerEl);
@@ -1028,6 +1166,12 @@ var ListWidget = class extends import_obsidian4.MarkdownRenderChild {
     this.timeEls = /* @__PURE__ */ new Map();
     /** tasks currently running, recomputed each render. */
     this.runningTasks = [];
+    /** Time shown per task id, so the footer can be re-summed on each tick. */
+    this.rowMs = /* @__PURE__ */ new Map();
+    /** Footer total, present only when the query has a `time:` window. */
+    this.totalEl = null;
+    /** Millisecond bounds of the query's window; null when it has none. */
+    this.bounds = null;
     /** Monotonic render token; guards against interleaved async renders. */
     this.renderSeq = 0;
     this.plugin = plugin;
@@ -1038,7 +1182,7 @@ var ListWidget = class extends import_obsidian4.MarkdownRenderChild {
     this.registerInterval(window.setInterval(() => this.tick(), 1e3));
     void this.render();
   }
-  /** Live-update only the running rows; full data is untouched. */
+  /** Live-update only the running rows (and the total they feed). */
   tick() {
     if (!this.runningTasks.length)
       return;
@@ -1048,10 +1192,28 @@ var ListWidget = class extends import_obsidian4.MarkdownRenderChild {
       const el = this.timeEls.get(t.id);
       if (!el)
         continue;
-      const { ms, flagged } = computeTotal(t.sessions, cap, now);
+      const { ms, flagged } = this.timeFor(t, cap, now);
       el.setText(formatDuration(ms));
       el.toggleClass("filo-flagged", flagged);
+      this.rowMs.set(t.id, ms);
     }
+    this.updateTotal();
+  }
+  /**
+   * A task's tracked time: the whole history, or just the query's window when
+   * it has one. The single place the window is applied, so rows, the sort and
+   * the total can't drift apart.
+   */
+  timeFor(task, cap, now = Date.now()) {
+    return this.bounds ? computeTotalInRange(task.sessions, cap, this.bounds.fromMs, this.bounds.toMs, now) : computeTotal(task.sessions, cap, now);
+  }
+  updateTotal() {
+    if (!this.totalEl)
+      return;
+    let sum = 0;
+    for (const ms of this.rowMs.values())
+      sum += ms;
+    this.totalEl.setText(formatDuration(sum));
   }
   async render() {
     var _a, _b;
@@ -1061,15 +1223,19 @@ var ListWidget = class extends import_obsidian4.MarkdownRenderChild {
     const all = await this.plugin.store.listTasks();
     if (seq !== this.renderSeq)
       return;
+    const window2 = this.query.time ? resolveWindow(this.query.time, today) : null;
+    this.bounds = window2 ? windowBounds(window2) : null;
     const tasks = applyQuery(all, this.query, {
-      totalTime: (t) => computeTotal(t.sessions, cap).ms,
+      totalTime: (t) => this.timeFor(t, cap).ms,
       today
     });
     const el = this.containerEl;
     el.empty();
     el.addClass("filo-list");
     this.timeEls.clear();
+    this.rowMs.clear();
     this.runningTasks = [];
+    this.totalEl = null;
     this.renderToolbar(el);
     if (this.query.errors.length) {
       el.createEl("div", {
@@ -1078,7 +1244,10 @@ var ListWidget = class extends import_obsidian4.MarkdownRenderChild {
       });
     }
     if (!tasks.length) {
-      el.createEl("div", { cls: "filo-empty", text: "No matching tasks." });
+      el.createEl("div", {
+        cls: "filo-empty",
+        text: window2 ? `No tracked time ${describeWindow(window2, today)}.` : "No matching tasks."
+      });
       return;
     }
     if (this.query.group === "parent") {
@@ -1103,6 +1272,15 @@ var ListWidget = class extends import_obsidian4.MarkdownRenderChild {
     } else {
       const rows = el.createDiv({ cls: "filo-rows" });
       this.renderTree(rows, tasks, cap, today);
+    }
+    if (window2) {
+      const footer = el.createDiv({ cls: "filo-total" });
+      footer.createSpan({
+        cls: "filo-total-label",
+        text: `Total ${describeWindow(window2, today)}`
+      });
+      this.totalEl = footer.createSpan({ cls: "filo-total-value" });
+      this.updateTotal();
     }
   }
   /**
@@ -1156,7 +1334,8 @@ var ListWidget = class extends import_obsidian4.MarkdownRenderChild {
   }
   renderRow(container, task, cap, today, depth = 0) {
     var _a, _b;
-    const { ms, flagged, running } = computeTotal(task.sessions, cap);
+    const { ms, flagged, running } = this.timeFor(task, cap);
+    this.rowMs.set(task.id, ms);
     const row = container.createDiv({ cls: "filo-row" });
     if (depth > 0)
       row.style.paddingLeft = `${4 + depth * 20}px`;
@@ -1523,7 +1702,270 @@ var CreateTaskModal = class extends import_obsidian6.Modal {
 };
 
 // src/ui/fileTimerButton.ts
+var import_obsidian8 = require("obsidian");
+
+// src/canvas/canvasImport.ts
 var import_obsidian7 = require("obsidian");
+var NODE_W = 640;
+var NODE_H = 640;
+var LEGACY_SIZES = [[260, 80]];
+var H_GAP = 80;
+var V_GAP = 140;
+var HEAT_RAMP = ["6", "5", "4", "3", "2", "1"];
+var ABS_THRESHOLDS_HOURS = [0.25, 1, 2, 4, 8];
+function colorForTime(ms, maxMs, mode) {
+  if (ms <= 0)
+    return void 0;
+  if (mode === "absolute") {
+    const hours = ms / 36e5;
+    let bucket = 0;
+    for (const t of ABS_THRESHOLDS_HOURS)
+      if (hours >= t)
+        bucket++;
+    return HEAT_RAMP[Math.min(bucket, HEAT_RAMP.length - 1)];
+  }
+  if (maxMs <= 0)
+    return void 0;
+  const r = ms / maxMs;
+  const idx = Math.min(HEAT_RAMP.length - 1, Math.floor(r * HEAT_RAMP.length));
+  return HEAT_RAMP[idx];
+}
+function layoutTree(nodes) {
+  var _a;
+  const childIds = /* @__PURE__ */ new Map();
+  for (const n of nodes) {
+    if (!n.task.parent)
+      continue;
+    const siblings = (_a = childIds.get(n.task.parent)) != null ? _a : [];
+    siblings.push(n.task.id);
+    childIds.set(n.task.parent, siblings);
+  }
+  const pos = /* @__PURE__ */ new Map();
+  const placed = /* @__PURE__ */ new Set();
+  let nextLeafX = 0;
+  const place = (id, depth) => {
+    var _a2;
+    placed.add(id);
+    const kids = ((_a2 = childIds.get(id)) != null ? _a2 : []).filter((k) => !placed.has(k));
+    let x;
+    if (!kids.length) {
+      x = nextLeafX;
+      nextLeafX += NODE_W + H_GAP;
+    } else {
+      const kidXs = kids.map((k) => place(k, depth + 1));
+      x = (kidXs[0] + kidXs[kidXs.length - 1]) / 2;
+    }
+    pos.set(id, { x, y: depth * (NODE_H + V_GAP) });
+    return x;
+  };
+  place(nodes[0].task.id, 0);
+  return pos;
+}
+function overlaps(a, b) {
+  return a.x < b.x + NODE_W && b.x < a.x + NODE_W && a.y < b.y + NODE_H && b.y < a.y + NODE_H;
+}
+function isLegacySize(node) {
+  return LEGACY_SIZES.some(([w, h]) => node.width === w && node.height === h);
+}
+function sizeFor(prev) {
+  if (!prev || prev.width === void 0 || prev.height === void 0 || isLegacySize(prev)) {
+    return { width: NODE_W, height: NODE_H };
+  }
+  return { width: prev.width, height: prev.height };
+}
+var ILLEGAL_NAME_CHARS = /[\\/:*?"<>|#^[\]]/g;
+var MAX_NAME_LEN = 80;
+function canvasFileName(title, fallback) {
+  const cleaned = title.replace(ILLEGAL_NAME_CHARS, " ").replace(/\s+/g, " ").trim().slice(0, MAX_NAME_LEN).replace(/^\.+|[.\s]+$/g, "");
+  return cleaned || fallback;
+}
+var TASK_EDGE_PREFIX = "e-t-";
+async function readCanvas(app, file) {
+  try {
+    const data = JSON.parse(await app.vault.read(file));
+    return {
+      nodes: Array.isArray(data.nodes) ? data.nodes : [],
+      edges: Array.isArray(data.edges) ? data.edges : []
+    };
+  } catch (e) {
+    return { nodes: [], edges: [] };
+  }
+}
+async function isCanvasRootedAt(app, file, rootId) {
+  const data = await readCanvas(app, file);
+  if (!data.nodes.some((n) => n.id === rootId))
+    return false;
+  return !data.edges.some(
+    (e) => e.toNode === rootId && String(e.id).startsWith(TASK_EDGE_PREFIX)
+  );
+}
+async function resolveCanvasPath(plugin, root) {
+  const app = plugin.app;
+  const folder = (0, import_obsidian7.normalizePath)(plugin.settings.canvasFolder || "");
+  const join = (name2) => folder ? `${folder}/${name2}.canvas` : `${name2}.canvas`;
+  const name = canvasFileName(root.title, root.id);
+  const titlePath = join(name);
+  const atTitle = app.vault.getAbstractFileByPath(titlePath);
+  if (atTitle instanceof import_obsidian7.TFile && await isCanvasRootedAt(app, atTitle, root.id)) {
+    return titlePath;
+  }
+  let existing = null;
+  const legacy = app.vault.getAbstractFileByPath(join(root.id));
+  if (legacy instanceof import_obsidian7.TFile && await isCanvasRootedAt(app, legacy, root.id)) {
+    existing = legacy;
+  } else {
+    const prefix = folder ? folder + "/" : "";
+    for (const f of app.vault.getFiles()) {
+      if (f.extension !== "canvas")
+        continue;
+      if (!f.path.startsWith(prefix))
+        continue;
+      if (f.path.slice(prefix.length).includes("/"))
+        continue;
+      if (await isCanvasRootedAt(app, f, root.id)) {
+        existing = f;
+        break;
+      }
+    }
+  }
+  if (existing) {
+    if (!atTitle) {
+      await app.fileManager.renameFile(existing, titlePath);
+      return titlePath;
+    }
+    return existing.path;
+  }
+  return atTitle ? join(`${name} (${root.id})`) : titlePath;
+}
+async function importTaskTreeToCanvas(plugin, rootId, target) {
+  const store = plugin.store;
+  const nodes = await store.getSubtree(rootId);
+  if (!nodes.length) {
+    new import_obsidian7.Notice("Filo: no task found to import.");
+    return null;
+  }
+  const capMs = plugin.getTimerCapMs();
+  const times = /* @__PURE__ */ new Map();
+  let maxMs = 0;
+  for (const n of nodes) {
+    const ms = computeTotal(n.task.sessions, capMs).ms;
+    times.set(n.task.id, ms);
+    if (ms > maxMs)
+      maxMs = ms;
+  }
+  const folder = (0, import_obsidian7.normalizePath)(plugin.settings.canvasFolder || "");
+  if (!target && folder && !plugin.app.vault.getAbstractFileByPath(folder)) {
+    await plugin.app.vault.createFolder(folder).catch(() => {
+    });
+  }
+  const canvasPath = target ? target.path : await resolveCanvasPath(plugin, nodes[0].task);
+  const existingFile = target != null ? target : plugin.app.vault.getAbstractFileByPath(canvasPath);
+  const existing = existingFile instanceof import_obsidian7.TFile ? await readCanvas(plugin.app, existingFile) : { nodes: [], edges: [] };
+  const prevById = new Map(existing.nodes.map((n) => [n.id, n]));
+  const taskIds = new Set(nodes.map((n) => n.task.id));
+  const ideal = layoutTree(nodes);
+  const prevTaskNodes = nodes.map((n) => prevById.get(n.task.id)).filter((p) => !!p);
+  const relayout = prevTaskNodes.length > 0 && prevTaskNodes.every(isLegacySize);
+  const taken = relayout ? [] : prevTaskNodes.map((p) => ({ x: p.x, y: p.y }));
+  const taskNodes = nodes.map((n) => {
+    var _a, _b;
+    const prev = prevById.get(n.task.id);
+    const color = colorForTime((_a = times.get(n.task.id)) != null ? _a : 0, maxMs, plugin.settings.rednessMode);
+    let at;
+    if (prev && !relayout) {
+      at = { x: prev.x, y: prev.y };
+    } else {
+      at = (_b = ideal.get(n.task.id)) != null ? _b : { x: 0, y: n.depth * (NODE_H + V_GAP) };
+      while (taken.some((t) => overlaps(at, t)))
+        at = { x: at.x, y: at.y + NODE_H + V_GAP };
+      taken.push(at);
+    }
+    const node = {
+      ...prev != null ? prev : {},
+      id: n.task.id,
+      type: "file",
+      file: n.task.path,
+      // refresh in case the file moved
+      x: at.x,
+      y: at.y,
+      ...sizeFor(prev)
+    };
+    if (color)
+      node.color = color;
+    else
+      delete node.color;
+    return node;
+  });
+  const foreignNodes = existing.nodes.filter((nd) => !String(nd.id).startsWith("t-"));
+  const taskEdges = [];
+  for (const n of nodes) {
+    if (n.task.parent && taskIds.has(n.task.parent)) {
+      taskEdges.push({
+        id: `e-${n.task.parent}-${n.task.id}`,
+        fromNode: n.task.parent,
+        toNode: n.task.id,
+        fromSide: "bottom",
+        toSide: "top"
+      });
+    }
+  }
+  const foreignEdges = existing.edges.filter((e) => !String(e.id).startsWith("e-t-"));
+  const out = {
+    nodes: [...foreignNodes, ...taskNodes],
+    edges: [...foreignEdges, ...taskEdges]
+  };
+  const json = JSON.stringify(out, null, 2);
+  const announce = (msg) => {
+    if (!target)
+      new import_obsidian7.Notice(msg);
+  };
+  if (existingFile instanceof import_obsidian7.TFile) {
+    await plugin.app.vault.modify(existingFile, json);
+    announce(
+      relayout ? `Filo: re-laid out canvas for the larger cards (${taskNodes.length} tasks).` : `Filo: updated canvas (${taskNodes.length} tasks).`
+    );
+    return existingFile;
+  }
+  const created = await plugin.app.vault.create(canvasPath, json);
+  announce(`Filo: created canvas (${taskNodes.length} tasks).`);
+  return created;
+}
+async function openTaskCanvas(plugin, rootId) {
+  const file = await importTaskTreeToCanvas(plugin, rootId);
+  if (file)
+    await revealCanvas(plugin, file);
+}
+async function revealCanvas(plugin, file) {
+  var _a;
+  for (const leaf of plugin.app.workspace.getLeavesOfType("canvas")) {
+    const open = leaf.view.file;
+    if ((open == null ? void 0 : open.path) !== file.path)
+      continue;
+    (_a = leaf.rebuildView) == null ? void 0 : _a.call(leaf);
+    plugin.app.workspace.revealLeaf(leaf);
+    return;
+  }
+  await plugin.app.workspace.getLeaf("tab").openFile(file);
+}
+var TaskPickerModal = class extends import_obsidian7.FuzzySuggestModal {
+  constructor(app, tasks, onChoose) {
+    super(app);
+    this.tasks = tasks;
+    this.onChoose = onChoose;
+    this.setPlaceholder("Pick the root task to import\u2026");
+  }
+  getItems() {
+    return this.tasks;
+  }
+  getItemText(task) {
+    return task.title;
+  }
+  onChooseItem(task) {
+    this.onChoose(task);
+  }
+};
+
+// src/ui/fileTimerButton.ts
 function isRunning(task) {
   return task.sessions.some((s) => s.stop === null);
 }
@@ -1540,7 +1982,7 @@ var FileTimerManager = class {
     const live = /* @__PURE__ */ new Set();
     for (const leaf of this.plugin.app.workspace.getLeavesOfType("markdown")) {
       const view = leaf.view;
-      if (!(view instanceof import_obsidian7.MarkdownView))
+      if (!(view instanceof import_obsidian8.MarkdownView))
         continue;
       live.add(view);
       const task = view.file ? byPath.get(view.file.path) : void 0;
@@ -1580,15 +2022,25 @@ var FileTimerManager = class {
       (evt) => void this.goToChild(task.id, evt)
     );
     childEl.addClass("filo-nav-child");
-    const rec = { taskId: task.id, timerEl, parentEl, childEl };
+    const canvasEl = view.addAction(
+      "layout-dashboard",
+      "Filo: open task canvas",
+      () => void this.openCanvas(task.id)
+    );
+    canvasEl.addClass("filo-nav-canvas");
+    const rec = { taskId: task.id, timerEl, parentEl, childEl, canvasEl };
     this.records.set(view, rec);
     return rec;
   }
   removeRecord(view, rec) {
+    this.removeEls(rec);
+    this.records.delete(view);
+  }
+  removeEls(rec) {
     rec.timerEl.remove();
     rec.parentEl.remove();
     rec.childEl.remove();
-    this.records.delete(view);
+    rec.canvasEl.remove();
   }
   async toggleTimer(taskId) {
     const task = await this.plugin.store.getTask(taskId);
@@ -1615,7 +2067,7 @@ var FileTimerManager = class {
       await this.plugin.openTaskFile(children[0]);
       return;
     }
-    const menu = new import_obsidian7.Menu();
+    const menu = new import_obsidian8.Menu();
     for (const child of children.slice().sort((a, b) => a.title.localeCompare(b.title))) {
       menu.addItem(
         (item) => item.setTitle(child.title).setIcon("circle").onClick(() => void this.plugin.openTaskFile(child))
@@ -1623,9 +2075,22 @@ var FileTimerManager = class {
     }
     menu.showAtMouseEvent(evt);
   }
+  /**
+   * Write the task's canvas (task note + its whole subtree) and open it. The
+   * canvas is refreshed on every press, so the button doubles as "sync this
+   * board with the task tree".
+   */
+  async openCanvas(taskId) {
+    try {
+      await openTaskCanvas(this.plugin, taskId);
+    } catch (e) {
+      console.error("[Filo] failed to open task canvas", e);
+      new import_obsidian8.Notice("Filo: failed to open task canvas");
+    }
+  }
   refresh(rec, task, hasParent, childCount) {
     const running = isRunning(task);
-    (0, import_obsidian7.setIcon)(rec.timerEl, running ? "square" : "play");
+    (0, import_obsidian8.setIcon)(rec.timerEl, running ? "square" : "play");
     const { ms } = computeTotal(task.sessions, this.plugin.getTimerCapMs());
     rec.timerEl.setAttribute(
       "aria-label",
@@ -1641,17 +2106,14 @@ var FileTimerManager = class {
   }
   /** Remove all controls (called on plugin unload). */
   destroy() {
-    for (const rec of this.records.values()) {
-      rec.timerEl.remove();
-      rec.parentEl.remove();
-      rec.childEl.remove();
-    }
+    for (const rec of this.records.values())
+      this.removeEls(rec);
     this.records.clear();
   }
 };
 
 // src/ui/statusBar.ts
-var import_obsidian8 = require("obsidian");
+var import_obsidian9 = require("obsidian");
 var MAX_TITLE = 28;
 var CurrentTaskStatus = class {
   constructor(plugin, el) {
@@ -1683,7 +2145,7 @@ var CurrentTaskStatus = class {
       this.sessions = [];
       this.title = "";
       this.el.toggleClass("filo-running", false);
-      (0, import_obsidian8.setIcon)(this.iconEl, "circle");
+      (0, import_obsidian9.setIcon)(this.iconEl, "circle");
       this.textEl.setText("No current task");
       this.el.setAttribute("aria-label", "Filo: no current task");
       return;
@@ -1692,7 +2154,7 @@ var CurrentTaskStatus = class {
     this.title = task.title;
     this.sessions = task.sessions;
     this.running = task.sessions.some((s) => s.stop === null);
-    (0, import_obsidian8.setIcon)(this.iconEl, this.running ? "clock" : "circle");
+    (0, import_obsidian9.setIcon)(this.iconEl, this.running ? "clock" : "circle");
     this.el.toggleClass("filo-running", this.running);
     this.el.setAttribute("aria-label", `Filo: jump to "${task.title}"`);
     this.renderText();
@@ -1714,13 +2176,13 @@ var CurrentTaskStatus = class {
 };
 
 // src/ui/taskSuggest.ts
-var import_obsidian10 = require("obsidian");
+var import_obsidian11 = require("obsidian");
 
 // src/store/mtime.ts
-var import_obsidian9 = require("obsidian");
+var import_obsidian10 = require("obsidian");
 function taskMtime(app, task) {
   const f = app.vault.getAbstractFileByPath(task.path);
-  return f instanceof import_obsidian9.TFile ? f.stat.mtime : 0;
+  return f instanceof import_obsidian10.TFile ? f.stat.mtime : 0;
 }
 function byRecentlyModified(app, tasks) {
   return tasks.map((task) => ({ task, mtime: taskMtime(app, task) })).sort((a, b) => b.mtime - a.mtime).map((x) => x.task);
@@ -1748,7 +2210,7 @@ function relativeTime(ms) {
 function safeAlias(title) {
   return title.replace(/[|\[\]]/g, "").trim() || "task";
 }
-var TaskLinkSuggest = class extends import_obsidian10.EditorSuggest {
+var TaskLinkSuggest = class extends import_obsidian11.EditorSuggest {
   constructor(plugin) {
     super(plugin.app);
     this.plugin = plugin;
@@ -1783,7 +2245,7 @@ var TaskLinkSuggest = class extends import_obsidian10.EditorSuggest {
   async getSuggestions(context) {
     const tasks = await this.plugin.store.listTasks();
     const query = context.query.trim();
-    const match = query ? (0, import_obsidian10.prepareFuzzySearch)(query) : null;
+    const match = query ? (0, import_obsidian11.prepareFuzzySearch)(query) : null;
     const out = [];
     for (const task of tasks) {
       if (this.plugin.settings.taskLinkHideDone && task.status === "done")
@@ -1832,7 +2294,7 @@ var TaskLinkSuggest = class extends import_obsidian10.EditorSuggest {
   linkFor(task, sourcePath) {
     const alias = safeAlias(task.title);
     const f = this.app.vault.getAbstractFileByPath(task.path);
-    if (f instanceof import_obsidian10.TFile) {
+    if (f instanceof import_obsidian11.TFile) {
       return this.app.fileManager.generateMarkdownLink(f, sourcePath, void 0, alias);
     }
     return `[[${task.path.replace(/\.md$/, "")}|${alias}]]`;
@@ -1840,7 +2302,7 @@ var TaskLinkSuggest = class extends import_obsidian10.EditorSuggest {
 };
 
 // src/ui/parentBanner.ts
-var import_obsidian11 = require("obsidian");
+var import_obsidian12 = require("obsidian");
 var STATUS_MENU_ICON = {
   undone: "circle",
   "in-progress": "circle-dot",
@@ -1859,7 +2321,7 @@ var STATUS_LABEL = {
 var STATUS_CLASSES = Object.keys(STATUS_LABEL).map(
   (s) => `filo-banner-status-${s}`
 );
-var ParentPickerModal = class extends import_obsidian11.FuzzySuggestModal {
+var ParentPickerModal = class extends import_obsidian12.FuzzySuggestModal {
   constructor(app, choices, onChoose) {
     super(app);
     this.choices = choices;
@@ -1902,7 +2364,7 @@ var ParentBannerManager = class {
     const live = /* @__PURE__ */ new Set();
     for (const leaf of this.plugin.app.workspace.getLeavesOfType("markdown")) {
       const view = leaf.view;
-      if (!(view instanceof import_obsidian11.MarkdownView))
+      if (!(view instanceof import_obsidian12.MarkdownView))
         continue;
       live.add(view);
       const task = view.file ? byPath.get(view.file.path) : void 0;
@@ -1937,12 +2399,12 @@ var ParentBannerManager = class {
     const valueEl = el.createEl("button", { cls: "filo-parent-value" });
     valueEl.addEventListener("click", () => void this.openPicker(task.id));
     const openEl = el.createEl("button", { cls: "filo-parent-open" });
-    (0, import_obsidian11.setIcon)(openEl, "corner-left-up");
+    (0, import_obsidian12.setIcon)(openEl, "corner-left-up");
     openEl.setAttribute("aria-label", "Open parent task");
     openEl.addEventListener("click", () => void this.goToParent(task.id));
     const childrenEl = el.createEl("button", { cls: "filo-parent-children" });
     const childIconEl = childrenEl.createSpan({ cls: "filo-parent-children-icon" });
-    (0, import_obsidian11.setIcon)(childIconEl, "list-tree");
+    (0, import_obsidian12.setIcon)(childIconEl, "list-tree");
     const childCountEl = childrenEl.createSpan({ cls: "filo-parent-children-count" });
     childrenEl.addEventListener("click", (evt) => void this.openChildMenu(task.id, evt));
     view.contentEl.prepend(el);
@@ -1969,7 +2431,7 @@ var ParentBannerManager = class {
     rec.statusEl.removeClass(...STATUS_CLASSES);
     rec.statusEl.addClass(`filo-banner-status-${task.status}`);
     rec.statusIconEl.empty();
-    (0, import_obsidian11.setIcon)(rec.statusIconEl, STATUS_MENU_ICON[task.status]);
+    (0, import_obsidian12.setIcon)(rec.statusIconEl, STATUS_MENU_ICON[task.status]);
     rec.statusTextEl.setText(STATUS_LABEL[task.status]);
     rec.statusEl.setAttribute(
       "aria-label",
@@ -2011,7 +2473,7 @@ var ParentBannerManager = class {
       await this.plugin.store.setStatus(taskId, NEXT_STATUS2[task.status]);
     } catch (e) {
       console.error("[Filo] failed to set status", e);
-      new import_obsidian11.Notice("Filo: failed to set status");
+      new import_obsidian12.Notice("Filo: failed to set status");
     }
   }
   /**
@@ -2022,7 +2484,7 @@ var ParentBannerManager = class {
   async openChildMenu(taskId, evt) {
     const children = await this.plugin.store.getChildren(taskId);
     if (!children.length) {
-      new import_obsidian11.Notice("Filo: no subtasks.");
+      new import_obsidian12.Notice("Filo: no subtasks.");
       return;
     }
     const order = {
@@ -2031,7 +2493,7 @@ var ParentBannerManager = class {
       done: 2
     };
     const sorted = children.slice().sort((a, b) => order[a.status] - order[b.status] || a.title.localeCompare(b.title));
-    const menu = new import_obsidian11.Menu();
+    const menu = new import_obsidian12.Menu();
     for (const child of sorted) {
       menu.addItem(
         (item) => item.setTitle(child.title).setIcon(STATUS_MENU_ICON[child.status]).onClick(() => void this.plugin.openTaskFile(child))
@@ -2071,7 +2533,7 @@ var ParentBannerManager = class {
       choices.push({ task: t, label: t.title });
     }
     if (!choices.length) {
-      new import_obsidian11.Notice("Filo: no other tasks available as a parent.");
+      new import_obsidian12.Notice("Filo: no other tasks available as a parent.");
       return;
     }
     new ParentPickerModal(app, choices, (choice) => {
@@ -2082,12 +2544,12 @@ var ParentBannerManager = class {
     var _a, _b;
     try {
       await this.plugin.store.updateTask(taskId, { parent: (_b = (_a = choice.task) == null ? void 0 : _a.id) != null ? _b : null });
-      new import_obsidian11.Notice(
+      new import_obsidian12.Notice(
         choice.task ? `Filo: parent set to "${choice.task.title}"` : "Filo: parent cleared"
       );
     } catch (e) {
       console.error("[Filo] failed to set parent", e);
-      new import_obsidian11.Notice("Filo: failed to set parent");
+      new import_obsidian12.Notice("Filo: failed to set parent");
     }
   }
   /** Remove all banners (called on plugin unload and when the setting is off). */
@@ -2098,153 +2560,304 @@ var ParentBannerManager = class {
   }
 };
 
-// src/canvas/canvasImport.ts
-var import_obsidian12 = require("obsidian");
-var NODE_W = 260;
-var NODE_H = 80;
-var H_GAP = 120;
-var V_GAP = 40;
-var HEAT_RAMP = ["6", "5", "4", "3", "2", "1"];
-var ABS_THRESHOLDS_HOURS = [0.25, 1, 2, 4, 8];
-function colorForTime(ms, maxMs, mode) {
-  if (ms <= 0)
-    return void 0;
-  if (mode === "absolute") {
-    const hours = ms / 36e5;
-    let bucket = 0;
-    for (const t of ABS_THRESHOLDS_HOURS)
-      if (hours >= t)
-        bucket++;
-    return HEAT_RAMP[Math.min(bucket, HEAT_RAMP.length - 1)];
+// src/ui/canvasActions.ts
+var import_obsidian14 = require("obsidian");
+
+// src/canvas/canvasDigest.ts
+var import_obsidian13 = require("obsidian");
+function sourceFor(plugin, node) {
+  var _a, _b;
+  if (node.type === "text") {
+    const { title, body } = splitCardText(String((_a = node.text) != null ? _a : ""));
+    return title ? { title, body } : null;
   }
-  if (maxMs <= 0)
-    return void 0;
-  const r = ms / maxMs;
-  const idx = Math.min(HEAT_RAMP.length - 1, Math.floor(r * HEAT_RAMP.length));
-  return HEAT_RAMP[idx];
+  if (node.type === "file") {
+    const f = plugin.app.vault.getAbstractFileByPath(String((_b = node.file) != null ? _b : ""));
+    if (!(f instanceof import_obsidian13.TFile) || f.extension !== "md")
+      return null;
+    return { title: f.basename, body: "", file: f };
+  }
+  return null;
 }
-async function importTaskTreeToCanvas(plugin, rootId) {
+function splitCardText(text) {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const i = lines.findIndex((l) => l.trim());
+  if (i === -1)
+    return { title: "", body: "" };
+  const title = lines[i].trim().replace(/^#{1,6}\s+/, "").replace(/^[-*+]\s+(\[[ xX]\]\s+)?/, "").trim();
+  return { title, body: lines.slice(i + 1).join("\n").trim() };
+}
+function findRootTaskId(present, byId) {
   var _a;
-  const store = plugin.store;
-  const nodes = await store.getSubtree(rootId);
-  if (!nodes.length) {
-    new import_obsidian12.Notice("Filo: no task found to import.");
+  const onBoard = new Set(present);
+  const isTop = (id) => {
+    var _a2, _b, _c, _d;
+    const seen = /* @__PURE__ */ new Set([id]);
+    let parent = (_b = (_a2 = byId.get(id)) == null ? void 0 : _a2.parent) != null ? _b : null;
+    while (parent && !seen.has(parent)) {
+      if (onBoard.has(parent))
+        return false;
+      seen.add(parent);
+      parent = (_d = (_c = byId.get(parent)) == null ? void 0 : _c.parent) != null ? _d : null;
+    }
+    return true;
+  };
+  const tops = present.filter(isTop);
+  if (!tops.length)
+    return (_a = present[0]) != null ? _a : null;
+  let best = tops[0];
+  let bestReach = -1;
+  for (const id of tops) {
+    const reach = present.filter((p) => {
+      var _a2, _b;
+      const seen = /* @__PURE__ */ new Set();
+      let cur = p;
+      while (cur && !seen.has(cur)) {
+        if (cur === id)
+          return true;
+        seen.add(cur);
+        cur = (_b = (_a2 = byId.get(cur)) == null ? void 0 : _a2.parent) != null ? _b : null;
+      }
+      return false;
+    }).length;
+    if (reach > bestReach) {
+      best = id;
+      bestReach = reach;
+    }
+  }
+  return best;
+}
+async function flushCanvasView(plugin, file) {
+  var _a, _b;
+  for (const leaf of plugin.app.workspace.getLeavesOfType("canvas")) {
+    const view = leaf.view;
+    if (((_a = view.file) == null ? void 0 : _a.path) === file.path)
+      await ((_b = view.save) == null ? void 0 : _b.call(view));
+  }
+}
+async function digestCanvas(plugin, file) {
+  var _a;
+  const app = plugin.app;
+  await flushCanvasView(plugin, file);
+  const canvas = await readCanvas(app, file);
+  if (!canvas.nodes.length) {
+    new import_obsidian13.Notice("Filo: this canvas is empty.");
     return;
   }
-  const capMs = plugin.getTimerCapMs();
-  const times = /* @__PURE__ */ new Map();
-  let maxMs = 0;
-  for (const n of nodes) {
-    const ms = computeTotal(n.task.sessions, capMs).ms;
-    times.set(n.task.id, ms);
-    if (ms > maxMs)
-      maxMs = ms;
-  }
-  const folder = (0, import_obsidian12.normalizePath)(plugin.settings.canvasFolder || "");
-  const canvasPath = folder ? `${folder}/${rootId}.canvas` : `${rootId}.canvas`;
-  if (folder && !plugin.app.vault.getAbstractFileByPath(folder)) {
-    await plugin.app.vault.createFolder(folder).catch(() => {
-    });
-  }
-  let existing = { nodes: [], edges: [] };
-  const existingFile = plugin.app.vault.getAbstractFileByPath(canvasPath);
-  if (existingFile instanceof import_obsidian12.TFile) {
-    try {
-      existing = JSON.parse(await plugin.app.vault.read(existingFile));
-      if (!Array.isArray(existing.nodes))
-        existing.nodes = [];
-      if (!Array.isArray(existing.edges))
-        existing.edges = [];
-    } catch (e) {
-      existing = { nodes: [], edges: [] };
+  const tasks = await plugin.store.listTasks();
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const byPath = new Map(tasks.map((t) => [t.path, t]));
+  const taskIdOf = /* @__PURE__ */ new Map();
+  for (const n of canvas.nodes) {
+    if (byId.has(n.id)) {
+      taskIdOf.set(n.id, n.id);
+    } else if (n.type === "file") {
+      const known = byPath.get(String((_a = n.file) != null ? _a : ""));
+      if (known)
+        taskIdOf.set(n.id, known.id);
     }
   }
-  const prevById = new Map(existing.nodes.map((n) => [n.id, n]));
-  const taskIds = new Set(nodes.map((n) => n.task.id));
-  const slot = {};
-  for (const n of nodes) {
-    if (prevById.has(n.task.id))
-      slot[n.depth] = ((_a = slot[n.depth]) != null ? _a : 0) + 1;
+  const rootTaskId = findRootTaskId(Array.from(new Set(taskIdOf.values())), byId);
+  if (!rootTaskId) {
+    new import_obsidian13.Notice("Filo: no Filo task on this canvas \u2014 open one from a task note first.");
+    return;
   }
-  const taskNodes = nodes.map((n) => {
-    var _a2, _b, _c, _d;
-    const prev = prevById.get(n.task.id);
-    const color = colorForTime((_a2 = times.get(n.task.id)) != null ? _a2 : 0, maxMs, plugin.settings.rednessMode);
-    let x;
-    let y;
-    if (prev) {
-      x = prev.x;
-      y = prev.y;
-    } else {
-      x = n.depth * (NODE_W + H_GAP);
-      const i = (_b = slot[n.depth]) != null ? _b : 0;
-      slot[n.depth] = i + 1;
-      y = i * (NODE_H + V_GAP);
+  const nodeById = new Map(canvas.nodes.map((n) => [n.id, n]));
+  const parentNodeOf = /* @__PURE__ */ new Map();
+  for (const e of canvas.edges) {
+    if (!parentNodeOf.has(e.toNode))
+      parentNodeOf.set(e.toNode, e.fromNode);
+  }
+  const resolving = /* @__PURE__ */ new Set();
+  const adoptedByPath = /* @__PURE__ */ new Map();
+  let createdCount = 0;
+  let adoptedCount = 0;
+  const resolve = async (nodeId) => {
+    var _a2;
+    const known = taskIdOf.get(nodeId);
+    if (known)
+      return known;
+    if (resolving.has(nodeId))
+      return null;
+    const node = nodeById.get(nodeId);
+    if (!node)
+      return null;
+    const alreadyAdopted = node.type === "file" ? adoptedByPath.get(String(node.file)) : void 0;
+    if (alreadyAdopted) {
+      taskIdOf.set(nodeId, alreadyAdopted);
+      return alreadyAdopted;
     }
-    const node = {
-      ...prev != null ? prev : {},
-      id: n.task.id,
-      type: "file",
-      file: n.task.path,
-      // refresh in case the file moved
-      x,
-      y,
-      width: (_c = prev == null ? void 0 : prev.width) != null ? _c : NODE_W,
-      height: (_d = prev == null ? void 0 : prev.height) != null ? _d : NODE_H
-    };
-    if (color)
-      node.color = color;
-    else
-      delete node.color;
-    return node;
-  });
-  const foreignNodes = existing.nodes.filter((nd) => !String(nd.id).startsWith("t-"));
-  const taskEdges = [];
-  for (const n of nodes) {
-    if (n.task.parent && taskIds.has(n.task.parent)) {
-      taskEdges.push({
-        id: `e-${n.task.parent}-${n.task.id}`,
-        fromNode: n.task.parent,
-        toNode: n.task.id,
-        fromSide: "right",
-        toSide: "left"
+    const source = sourceFor(plugin, node);
+    if (!source)
+      return null;
+    resolving.add(nodeId);
+    const parentNode = parentNodeOf.get(nodeId);
+    const parentId = (_a2 = parentNode ? await resolve(parentNode) : null) != null ? _a2 : rootTaskId;
+    resolving.delete(nodeId);
+    let task;
+    if (source.file) {
+      const from = source.file.path;
+      task = await plugin.store.adoptFile(source.file, {
+        title: source.title,
+        parent: parentId
       });
+      adoptedByPath.set(from, task.id);
+      adoptedCount++;
+    } else {
+      task = await plugin.store.createTask({
+        title: source.title,
+        body: source.body,
+        parent: parentId
+      });
+      createdCount++;
+    }
+    taskIdOf.set(nodeId, task.id);
+    return task.id;
+  };
+  for (const n of canvas.nodes)
+    await resolve(n.id);
+  let reparented = 0;
+  let refused = 0;
+  for (const e of canvas.edges) {
+    const childId = taskIdOf.get(e.toNode);
+    const parentId = taskIdOf.get(e.fromNode);
+    if (!childId || !parentId || childId === parentId)
+      continue;
+    const child = byId.get(childId);
+    if (!child || child.parent === parentId)
+      continue;
+    const descendants = await plugin.store.getSubtree(childId);
+    if (descendants.some((d) => d.task.id === parentId)) {
+      refused++;
+      continue;
+    }
+    await plugin.store.updateTask(childId, { parent: parentId });
+    reparented++;
+  }
+  if (!createdCount && !adoptedCount && !reparented) {
+    new import_obsidian13.Notice(
+      refused ? "Filo: nothing to digest (an edge would have made a task its own ancestor)." : "Filo: nothing new on this canvas."
+    );
+    await rebuild(plugin, rootTaskId, file);
+    return;
+  }
+  await writeDigestedCanvas(plugin, file, canvas.nodes, canvas.edges, taskIdOf);
+  await rebuild(plugin, rootTaskId, file);
+  const parts = [];
+  if (createdCount)
+    parts.push(`${createdCount} created`);
+  if (adoptedCount)
+    parts.push(`${adoptedCount} adopted`);
+  if (reparented)
+    parts.push(`${reparented} re-parented`);
+  if (refused)
+    parts.push(`${refused} skipped (would loop)`);
+  new import_obsidian13.Notice(`Filo: digested canvas \u2014 ${parts.join(", ")}.`);
+}
+async function writeDigestedCanvas(plugin, file, nodes, edges, taskIdOf) {
+  const tasks = await plugin.store.listTasks();
+  const pathById = new Map(tasks.map((t) => [t.id, t.path]));
+  const outNodes = nodes.map((node) => {
+    const taskId = taskIdOf.get(node.id);
+    const path = taskId ? pathById.get(taskId) : void 0;
+    if (!taskId || taskId === node.id || !path)
+      return node;
+    const { text, ...rest } = node;
+    return { ...rest, id: taskId, type: "file", file: path };
+  });
+  const taskNodeIds = new Set(taskIdOf.values());
+  const outEdges = edges.map((e) => {
+    var _a, _b;
+    return {
+      ...e,
+      fromNode: (_a = taskIdOf.get(e.fromNode)) != null ? _a : e.fromNode,
+      toNode: (_b = taskIdOf.get(e.toNode)) != null ? _b : e.toNode
+    };
+  }).filter((e) => !(taskNodeIds.has(e.fromNode) && taskNodeIds.has(e.toNode))).filter((e) => !String(e.id).startsWith(TASK_EDGE_PREFIX));
+  await plugin.app.vault.modify(
+    file,
+    JSON.stringify({ nodes: outNodes, edges: outEdges }, null, 2)
+  );
+}
+async function rebuild(plugin, rootTaskId, file) {
+  const out = await importTaskTreeToCanvas(plugin, rootTaskId, file);
+  if (out)
+    await revealCanvas(plugin, out);
+}
+
+// src/ui/canvasActions.ts
+var CanvasActionManager = class {
+  constructor(plugin) {
+    this.records = /* @__PURE__ */ new Map();
+    /**
+     * Whether a canvas is a Filo board, keyed by path and invalidated by mtime.
+     * The check has to read the file, and this runs on every layout change, so
+     * an unchanged canvas is answered from here.
+     */
+    this.isFilo = /* @__PURE__ */ new Map();
+    this.plugin = plugin;
+  }
+  /** Re-sync the button across all open canvas leaves. */
+  async update() {
+    const taskIds = new Set((await this.plugin.store.listTasks()).map((t) => t.id));
+    const live = /* @__PURE__ */ new Set();
+    for (const leaf of this.plugin.app.workspace.getLeavesOfType("canvas")) {
+      const view = leaf.view;
+      const file = view.file;
+      if (!(view instanceof import_obsidian14.ItemView) || !(file instanceof import_obsidian14.TFile))
+        continue;
+      live.add(leaf);
+      let rec = this.records.get(leaf);
+      if (rec && rec.path !== file.path) {
+        rec.el.remove();
+        this.records.delete(leaf);
+        rec = void 0;
+      }
+      if (!rec) {
+        const el = view.addAction(
+          "sprout",
+          "Filo: digest canvas into tasks",
+          () => void this.digest(file)
+        );
+        el.addClass("filo-canvas-digest");
+        rec = { path: file.path, el };
+        this.records.set(leaf, rec);
+      }
+      rec.el.style.display = await this.isFiloCanvas(file, taskIds) ? "" : "none";
+    }
+    for (const leaf of Array.from(this.records.keys())) {
+      if (!live.has(leaf))
+        this.records.delete(leaf);
     }
   }
-  const foreignEdges = existing.edges.filter((e) => !String(e.id).startsWith("e-t-"));
-  const out = {
-    nodes: [...foreignNodes, ...taskNodes],
-    edges: [...foreignEdges, ...taskEdges]
-  };
-  const json = JSON.stringify(out, null, 2);
-  if (existingFile instanceof import_obsidian12.TFile) {
-    await plugin.app.vault.modify(existingFile, json);
-    new import_obsidian12.Notice(`Filo: updated canvas (${taskNodes.length} tasks).`);
-  } else {
-    await plugin.app.vault.create(canvasPath, json);
-    new import_obsidian12.Notice(`Filo: created canvas (${taskNodes.length} tasks).`);
+  async isFiloCanvas(file, taskIds) {
+    const hit = this.isFilo.get(file.path);
+    if (hit && hit.mtime === file.stat.mtime)
+      return hit.value;
+    const canvas = await readCanvas(this.plugin.app, file);
+    const value = canvas.nodes.some((n) => taskIds.has(n.id));
+    this.isFilo.set(file.path, { mtime: file.stat.mtime, value });
+    return value;
   }
-}
-var TaskPickerModal = class extends import_obsidian12.FuzzySuggestModal {
-  constructor(app, tasks, onChoose) {
-    super(app);
-    this.tasks = tasks;
-    this.onChoose = onChoose;
-    this.setPlaceholder("Pick the root task to import\u2026");
+  async digest(file) {
+    try {
+      await digestCanvas(this.plugin, file);
+    } catch (e) {
+      console.error("[Filo] canvas digest failed", e);
+      new import_obsidian14.Notice("Filo: failed to digest canvas");
+    }
   }
-  getItems() {
-    return this.tasks;
-  }
-  getItemText(task) {
-    return task.title;
-  }
-  onChooseItem(task) {
-    this.onChoose(task);
+  /** Remove all buttons (called on plugin unload). */
+  destroy() {
+    for (const rec of this.records.values())
+      rec.el.remove();
+    this.records.clear();
+    this.isFilo.clear();
   }
 };
 
 // src/main.ts
-var FiloPlugin = class extends import_obsidian13.Plugin {
+var FiloPlugin = class extends import_obsidian15.Plugin {
   constructor() {
     super(...arguments);
     this.activeTaskId = null;
@@ -2255,6 +2868,7 @@ var FiloPlugin = class extends import_obsidian13.Plugin {
     this.store = new TaskStore(this.app, this);
     this.fileTimer = new FileTimerManager(this);
     this.parentBanner = new ParentBannerManager(this);
+    this.canvasActions = new CanvasActionManager(this);
     this.status = new CurrentTaskStatus(this, this.addStatusBarItem());
     this.registerEvent(
       this.app.vault.on("modify", (f) => this.store.handleVaultChange(f.path))
@@ -2298,8 +2912,20 @@ var FiloPlugin = class extends import_obsidian13.Plugin {
     });
     this.addCommand({
       id: "import-task-tree-to-canvas",
-      name: "Import task tree to canvas",
+      name: "Open task canvas",
       callback: () => void this.runCanvasImport()
+    });
+    this.addCommand({
+      id: "digest-canvas",
+      name: "Digest canvas into tasks",
+      checkCallback: (checking) => {
+        const file = this.activeCanvasFile();
+        if (!file)
+          return false;
+        if (!checking)
+          void this.runDigest(file);
+        return true;
+      }
     });
     this.addCommand({
       id: "load-tasks",
@@ -2334,31 +2960,36 @@ var FiloPlugin = class extends import_obsidian13.Plugin {
     try {
       const count = await this.store.processRecurring();
       if (announce) {
-        new import_obsidian13.Notice(
+        new import_obsidian15.Notice(
           count > 0 ? `Filo: reset ${count} recurring task${count === 1 ? "" : "s"}` : "Filo: no recurring tasks due"
         );
       }
     } catch (e) {
       console.error("[Filo] processRecurring failed", e);
       if (announce)
-        new import_obsidian13.Notice("Filo: failed to process recurring tasks");
+        new import_obsidian15.Notice("Filo: failed to process recurring tasks");
     }
   }
   onunload() {
-    var _a, _b;
+    var _a, _b, _c;
     (_a = this.fileTimer) == null ? void 0 : _a.destroy();
     (_b = this.parentBanner) == null ? void 0 : _b.destroy();
+    (_c = this.canvasActions) == null ? void 0 : _c.destroy();
   }
-  /** Re-sync the per-note task UI (header timer/nav buttons and parent banner). */
+  /**
+   * Re-sync the per-view task UI: the note's header buttons and parent banner,
+   * and the digest button on canvas views.
+   */
   refreshFileUI() {
     void this.fileTimer.update();
     void this.parentBanner.update();
+    void this.canvasActions.update();
   }
   /** Track the last opened task file (for the status-bar fallback) and refresh UI. */
   async onFileOpen(file) {
     this.refreshFileUI();
-    if (file instanceof import_obsidian13.TFile && file.extension === "md") {
-      const folder = (0, import_obsidian13.normalizePath)(this.settings.tasksFolder || "tasks");
+    if (file instanceof import_obsidian15.TFile && file.extension === "md") {
+      const folder = (0, import_obsidian15.normalizePath)(this.settings.tasksFolder || "tasks");
       if (file.path.startsWith(folder + "/")) {
         const task = (await this.store.listTasks()).find((t) => t.path === file.path);
         if (task && task.id !== this.lastTaskId) {
@@ -2394,15 +3025,15 @@ var FiloPlugin = class extends import_obsidian13.Plugin {
   /** Open a task's backing file in the active leaf. */
   async openTaskFile(task) {
     const f = this.app.vault.getAbstractFileByPath(task.path);
-    if (f instanceof import_obsidian13.TFile)
+    if (f instanceof import_obsidian15.TFile)
       await this.app.workspace.getLeaf(false).openFile(f);
   }
   /** Active file's path if it's a markdown file inside the tasks folder, else null. */
   activeTaskFilePath() {
     const f = this.app.workspace.getActiveFile();
-    if (!(f instanceof import_obsidian13.TFile) || f.extension !== "md")
+    if (!(f instanceof import_obsidian15.TFile) || f.extension !== "md")
       return null;
-    const folder = (0, import_obsidian13.normalizePath)(this.settings.tasksFolder || "tasks");
+    const folder = (0, import_obsidian15.normalizePath)(this.settings.tasksFolder || "tasks");
     return f.path.startsWith(folder + "/") ? f.path : null;
   }
   /** Open the create-task modal, defaulting the parent to the active task (if any). */
@@ -2416,23 +3047,39 @@ var FiloPlugin = class extends import_obsidian13.Plugin {
     }
     new CreateTaskModal(this.app, this, parentId).open();
   }
+  /** The active view's file when it's a canvas, else null. */
+  activeCanvasFile() {
+    const view = this.app.workspace.getActiveViewOfType(import_obsidian15.ItemView);
+    const file = this.app.workspace.getActiveFile();
+    if (!view || view.getViewType() !== "canvas")
+      return null;
+    return file instanceof import_obsidian15.TFile && file.extension === "canvas" ? file : null;
+  }
+  async runDigest(file) {
+    try {
+      await digestCanvas(this, file);
+    } catch (e) {
+      console.error("[Filo] canvas digest failed", e);
+      new import_obsidian15.Notice("Filo: failed to digest canvas");
+    }
+  }
   async runCanvasImport() {
     var _a, _b;
     const active = this.app.workspace.getActiveFile();
     const tasks = await this.store.listTasks();
     let rootId = null;
-    if (active instanceof import_obsidian13.TFile) {
+    if (active instanceof import_obsidian15.TFile) {
       rootId = (_b = (_a = tasks.find((t) => t.path === active.path)) == null ? void 0 : _a.id) != null ? _b : null;
     }
     if (rootId) {
-      await importTaskTreeToCanvas(this, rootId);
+      await openTaskCanvas(this, rootId);
       return;
     }
     if (!tasks.length) {
-      new import_obsidian13.Notice("Filo: no tasks to import.");
+      new import_obsidian15.Notice("Filo: no tasks to import.");
       return;
     }
-    new TaskPickerModal(this.app, tasks, (t) => void importTaskTreeToCanvas(this, t.id)).open();
+    new TaskPickerModal(this.app, tasks, (t) => void openTaskCanvas(this, t.id)).open();
   }
   // --- FiloDataAccess (consumed by TaskStore) ------------------------------
   getTasksFolder() {

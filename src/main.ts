@@ -1,4 +1,4 @@
-import { Notice, Plugin, TFile, normalizePath } from "obsidian";
+import { ItemView, Notice, Plugin, TFile, normalizePath } from "obsidian";
 import { Task, TaskInput } from "./types";
 import { DEFAULT_SETTINGS, FiloSettings, FiloSettingTab } from "./settings";
 import { FiloDataAccess, TaskStore } from "./store/TaskStore";
@@ -10,7 +10,9 @@ import { FileTimerManager } from "./ui/fileTimerButton";
 import { CurrentTaskStatus } from "./ui/statusBar";
 import { TaskLinkSuggest } from "./ui/taskSuggest";
 import { ParentBannerManager } from "./ui/parentBanner";
-import { TaskPickerModal, importTaskTreeToCanvas } from "./canvas/canvasImport";
+import { CanvasActionManager } from "./ui/canvasActions";
+import { TaskPickerModal, openTaskCanvas } from "./canvas/canvasImport";
+import { digestCanvas } from "./canvas/canvasDigest";
 
 /** Shape persisted via loadData/saveData. */
 interface FiloData {
@@ -28,6 +30,7 @@ export default class FiloPlugin extends Plugin implements FiloDataAccess {
   private lastTaskId: string | null = null;
   private fileTimer!: FileTimerManager;
   private parentBanner!: ParentBannerManager;
+  private canvasActions!: CanvasActionManager;
   private status!: CurrentTaskStatus;
 
   async onload(): Promise<void> {
@@ -36,6 +39,7 @@ export default class FiloPlugin extends Plugin implements FiloDataAccess {
     this.store = new TaskStore(this.app, this);
     this.fileTimer = new FileTimerManager(this);
     this.parentBanner = new ParentBannerManager(this);
+    this.canvasActions = new CanvasActionManager(this);
     this.status = new CurrentTaskStatus(this, this.addStatusBarItem());
 
     // Cache invalidation: any create/modify/delete/rename inside the tasks
@@ -93,11 +97,25 @@ export default class FiloPlugin extends Plugin implements FiloDataAccess {
       },
     });
 
-    // Canvas import command.
+    // Canvas command. The id is kept from when this was "import task tree to
+    // canvas" so existing hotkeys keep working.
     this.addCommand({
       id: "import-task-tree-to-canvas",
-      name: "Import task tree to canvas",
+      name: "Open task canvas",
       callback: () => void this.runCanvasImport(),
+    });
+
+    // Turn the active canvas back into tasks. Gated on the active view being a
+    // canvas file, so it stays out of the palette everywhere else.
+    this.addCommand({
+      id: "digest-canvas",
+      name: "Digest canvas into tasks",
+      checkCallback: (checking) => {
+        const file = this.activeCanvasFile();
+        if (!file) return false;
+        if (!checking) void this.runDigest(file);
+        return true;
+      },
     });
 
     // Scan recurring tasks and reset any whose cadence has elapsed.
@@ -160,12 +178,17 @@ export default class FiloPlugin extends Plugin implements FiloDataAccess {
   onunload(): void {
     this.fileTimer?.destroy();
     this.parentBanner?.destroy();
+    this.canvasActions?.destroy();
   }
 
-  /** Re-sync the per-note task UI (header timer/nav buttons and parent banner). */
+  /**
+   * Re-sync the per-view task UI: the note's header buttons and parent banner,
+   * and the digest button on canvas views.
+   */
   private refreshFileUI(): void {
     void this.fileTimer.update();
     void this.parentBanner.update();
+    void this.canvasActions.update();
   }
 
   /** Track the last opened task file (for the status-bar fallback) and refresh UI. */
@@ -233,6 +256,23 @@ export default class FiloPlugin extends Plugin implements FiloDataAccess {
     new CreateTaskModal(this.app, this, parentId).open();
   }
 
+  /** The active view's file when it's a canvas, else null. */
+  private activeCanvasFile(): TFile | null {
+    const view = this.app.workspace.getActiveViewOfType(ItemView);
+    const file = this.app.workspace.getActiveFile();
+    if (!view || view.getViewType() !== "canvas") return null;
+    return file instanceof TFile && file.extension === "canvas" ? file : null;
+  }
+
+  private async runDigest(file: TFile): Promise<void> {
+    try {
+      await digestCanvas(this, file);
+    } catch (e) {
+      console.error("[Filo] canvas digest failed", e);
+      new Notice("Filo: failed to digest canvas");
+    }
+  }
+
   private async runCanvasImport(): Promise<void> {
     // If invoked from inside a task file, use that task as the root.
     const active = this.app.workspace.getActiveFile();
@@ -243,7 +283,7 @@ export default class FiloPlugin extends Plugin implements FiloDataAccess {
     }
 
     if (rootId) {
-      await importTaskTreeToCanvas(this, rootId);
+      await openTaskCanvas(this, rootId);
       return;
     }
     if (!tasks.length) {
@@ -251,7 +291,7 @@ export default class FiloPlugin extends Plugin implements FiloDataAccess {
       return;
     }
     // Otherwise prompt to pick a root task.
-    new TaskPickerModal(this.app, tasks, (t) => void importTaskTreeToCanvas(this, t.id)).open();
+    new TaskPickerModal(this.app, tasks, (t) => void openTaskCanvas(this, t.id)).open();
   }
 
   // --- FiloDataAccess (consumed by TaskStore) ------------------------------

@@ -1,8 +1,8 @@
 import { MarkdownRenderChild, TFile } from "obsidian";
 import type FiloPlugin from "../main";
 import { Task, TaskStatus } from "../types";
-import { applyQuery, ListQuery, parseQuery } from "../dsl/filter";
-import { computeTotal, formatDuration } from "../store/timeBlock";
+import { applyQuery, ListQuery, parseQuery, resolveWindow, TimeWindow } from "../dsl/filter";
+import { computeTotal, computeTotalInRange, formatDuration } from "../store/timeBlock";
 
 export const STATUS_ICON: Record<TaskStatus, string> = {
   undone: "○",
@@ -26,6 +26,27 @@ function todayStr(): string {
   return `${y}-${m}-${day}`;
 }
 
+/** Human label for a window, e.g. "today", "on 2026-08-19", "2026-08-01 → 2026-08-25". */
+function describeWindow(w: TimeWindow, today: string): string {
+  if (w.from !== w.to) return `${w.from} → ${w.to}`;
+  if (w.from === today) return "today";
+  return `on ${w.from}`;
+}
+
+/** Local midnight of a `YYYY-MM-DD`, in ms. */
+function dayStartMs(date: string): number {
+  const [y, m, d] = date.split("-").map(Number);
+  return new Date(y, m - 1, d).getTime();
+}
+
+/**
+ * A window's half-open millisecond bounds: local midnight of `from` up to local
+ * midnight of the day AFTER `to`, so the last day is included whole.
+ */
+function windowBounds(w: TimeWindow): { fromMs: number; toMs: number } {
+  return { fromMs: dayStartMs(w.from), toMs: dayStartMs(w.to) + 86_400_000 };
+}
+
 /**
  * Renders a ```t-list block.
  *
@@ -44,6 +65,12 @@ export class ListWidget extends MarkdownRenderChild {
   private timeEls = new Map<string, HTMLElement>();
   /** tasks currently running, recomputed each render. */
   private runningTasks: Task[] = [];
+  /** Time shown per task id, so the footer can be re-summed on each tick. */
+  private rowMs = new Map<string, number>();
+  /** Footer total, present only when the query has a `time:` window. */
+  private totalEl: HTMLElement | null = null;
+  /** Millisecond bounds of the query's window; null when it has none. */
+  private bounds: { fromMs: number; toMs: number } | null = null;
   /** Monotonic render token; guards against interleaved async renders. */
   private renderSeq = 0;
 
@@ -59,7 +86,7 @@ export class ListWidget extends MarkdownRenderChild {
     void this.render();
   }
 
-  /** Live-update only the running rows; full data is untouched. */
+  /** Live-update only the running rows (and the total they feed). */
   private tick(): void {
     if (!this.runningTasks.length) return;
     const cap = this.plugin.getTimerCapMs();
@@ -67,10 +94,30 @@ export class ListWidget extends MarkdownRenderChild {
     for (const t of this.runningTasks) {
       const el = this.timeEls.get(t.id);
       if (!el) continue;
-      const { ms, flagged } = computeTotal(t.sessions, cap, now);
+      const { ms, flagged } = this.timeFor(t, cap, now);
       el.setText(formatDuration(ms));
       el.toggleClass("filo-flagged", flagged);
+      this.rowMs.set(t.id, ms);
     }
+    this.updateTotal();
+  }
+
+  /**
+   * A task's tracked time: the whole history, or just the query's window when
+   * it has one. The single place the window is applied, so rows, the sort and
+   * the total can't drift apart.
+   */
+  private timeFor(task: Task, cap: number, now: number = Date.now()) {
+    return this.bounds
+      ? computeTotalInRange(task.sessions, cap, this.bounds.fromMs, this.bounds.toMs, now)
+      : computeTotal(task.sessions, cap, now);
+  }
+
+  private updateTotal(): void {
+    if (!this.totalEl) return;
+    let sum = 0;
+    for (const ms of this.rowMs.values()) sum += ms;
+    this.totalEl.setText(formatDuration(sum));
   }
 
   private async render(): Promise<void> {
@@ -82,8 +129,11 @@ export class ListWidget extends MarkdownRenderChild {
     // is allowed to touch the DOM, so rows can never be appended twice.
     if (seq !== this.renderSeq) return;
 
+    const window = this.query.time ? resolveWindow(this.query.time, today) : null;
+    this.bounds = window ? windowBounds(window) : null;
+
     const tasks = applyQuery(all, this.query, {
-      totalTime: (t) => computeTotal(t.sessions, cap).ms,
+      totalTime: (t) => this.timeFor(t, cap).ms,
       today,
     });
 
@@ -91,7 +141,9 @@ export class ListWidget extends MarkdownRenderChild {
     el.empty();
     el.addClass("filo-list");
     this.timeEls.clear();
+    this.rowMs.clear();
     this.runningTasks = [];
+    this.totalEl = null;
 
     // Rendered before the empty/error branches so the button is reachable even
     // when nothing matches the query.
@@ -105,7 +157,10 @@ export class ListWidget extends MarkdownRenderChild {
     }
 
     if (!tasks.length) {
-      el.createEl("div", { cls: "filo-empty", text: "No matching tasks." });
+      el.createEl("div", {
+        cls: "filo-empty",
+        text: window ? `No tracked time ${describeWindow(window, today)}.` : "No matching tasks.",
+      });
       return;
     }
 
@@ -132,6 +187,18 @@ export class ListWidget extends MarkdownRenderChild {
     } else {
       const rows = el.createDiv({ cls: "filo-rows" });
       this.renderTree(rows, tasks, cap, today);
+    }
+
+    // The answer to "how long did I work": only meaningful against a window, so
+    // ordinary lists are left as they were.
+    if (window) {
+      const footer = el.createDiv({ cls: "filo-total" });
+      footer.createSpan({
+        cls: "filo-total-label",
+        text: `Total ${describeWindow(window, today)}`,
+      });
+      this.totalEl = footer.createSpan({ cls: "filo-total-value" });
+      this.updateTotal();
     }
   }
 
@@ -190,7 +257,8 @@ export class ListWidget extends MarkdownRenderChild {
     today: string,
     depth = 0
   ): void {
-    const { ms, flagged, running } = computeTotal(task.sessions, cap);
+    const { ms, flagged, running } = this.timeFor(task, cap);
+    this.rowMs.set(task.id, ms);
     const row = container.createDiv({ cls: "filo-row" });
     // Indent the whole row to nest children beneath their parent.
     if (depth > 0) row.style.paddingLeft = `${4 + depth * 20}px`;

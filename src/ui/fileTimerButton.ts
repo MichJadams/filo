@@ -1,7 +1,8 @@
-import { MarkdownView, Menu, setIcon } from "obsidian";
+import { MarkdownView, Menu, Notice, setIcon } from "obsidian";
 import type FiloPlugin from "../main";
 import { Task } from "../types";
 import { computeTotal, formatDuration } from "../store/timeBlock";
+import { openTaskCanvas } from "../canvas/canvasImport";
 
 /** A task is running if any of its sessions has no stop time. */
 function isRunning(task: Task): boolean {
@@ -13,6 +14,7 @@ interface ViewRecord {
   timerEl: HTMLElement;
   parentEl: HTMLElement;
   childEl: HTMLElement;
+  canvasEl: HTMLElement;
 }
 
 /**
@@ -20,7 +22,8 @@ interface ViewRecord {
  *   - a start/stop timer toggle,
  *   - "go to parent task" (shown when the task has a parent),
  *   - "go to child task" (shown when the task has children; opens the only
- *     child, or pops a menu to pick among several).
+ *     child, or pops a menu to pick among several),
+ *   - "open task canvas" (builds/refreshes the task's canvas and opens it).
  *
  * Works in both reading and editing modes and stays in sync with task changes.
  * One MarkdownView can show different files over its lifetime, so records are
@@ -90,16 +93,26 @@ export class FileTimerManager {
     );
     childEl.addClass("filo-nav-child");
 
-    const rec: ViewRecord = { taskId: task.id, timerEl, parentEl, childEl };
+    const canvasEl = view.addAction("layout-dashboard", "Filo: open task canvas", () =>
+      void this.openCanvas(task.id)
+    );
+    canvasEl.addClass("filo-nav-canvas");
+
+    const rec: ViewRecord = { taskId: task.id, timerEl, parentEl, childEl, canvasEl };
     this.records.set(view, rec);
     return rec;
   }
 
   private removeRecord(view: MarkdownView, rec: ViewRecord): void {
+    this.removeEls(rec);
+    this.records.delete(view);
+  }
+
+  private removeEls(rec: ViewRecord): void {
     rec.timerEl.remove();
     rec.parentEl.remove();
     rec.childEl.remove();
-    this.records.delete(view);
+    rec.canvasEl.remove();
   }
 
   private async toggleTimer(taskId: string): Promise<void> {
@@ -136,6 +149,20 @@ export class FileTimerManager {
     menu.showAtMouseEvent(evt);
   }
 
+  /**
+   * Write the task's canvas (task note + its whole subtree) and open it. The
+   * canvas is refreshed on every press, so the button doubles as "sync this
+   * board with the task tree".
+   */
+  private async openCanvas(taskId: string): Promise<void> {
+    try {
+      await openTaskCanvas(this.plugin, taskId);
+    } catch (e) {
+      console.error("[Filo] failed to open task canvas", e);
+      new Notice("Filo: failed to open task canvas");
+    }
+  }
+
   private refresh(rec: ViewRecord, task: Task, hasParent: boolean, childCount: number): void {
     const running = isRunning(task);
     setIcon(rec.timerEl, running ? "square" : "play");
@@ -157,11 +184,7 @@ export class FileTimerManager {
 
   /** Remove all controls (called on plugin unload). */
   destroy(): void {
-    for (const rec of this.records.values()) {
-      rec.timerEl.remove();
-      rec.parentEl.remove();
-      rec.childEl.remove();
-    }
+    for (const rec of this.records.values()) this.removeEls(rec);
     this.records.clear();
   }
 }

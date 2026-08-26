@@ -53,6 +53,24 @@
   color: var(--text-muted);
   font-style: italic;
 }
+/* Summed tracked time for a `time:` window, below the rows. */
+.filo-total {
+  display: flex;
+  justify-content: flex-end;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+.filo-total-label {
+  font-size: 0.85em;
+  color: var(--text-muted);
+}
+.filo-total-value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
 .filo-group-header {
   font-weight: 700;
   margin-top: 8px;

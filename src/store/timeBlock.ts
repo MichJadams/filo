@@ -87,16 +87,24 @@ export interface TotalResult {
 }
 
 /**
- * Sum tracked time across all sessions.
+ * Sum the tracked time that falls inside `[fromMs, toMs)`.
  *
- * Completed sessions contribute `stop - start`. A running session contributes
- * `now - start`, but capped at `capMs`: if a running session exceeds the cap
- * we count only `capMs` and set `flagged` (rather than silently accumulating a
- * runaway timer that someone forgot to stop).
+ * Sessions are *clipped* to the window rather than counted whole, so a session
+ * running from 23:00 to 01:00 contributes an hour to each day — which is what
+ * makes "how long did I work today" answerable at all.
+ *
+ * Completed sessions contribute `stop - start`. A running session runs to `now`,
+ * but no longer than `capMs` from its start: past that it's treated as a timer
+ * someone forgot to stop, counted only up to the cap and `flagged`.
+ *
+ * `running` reports an open session *overlapping this window* — a timer running
+ * now doesn't make last Tuesday's total live.
  */
-export function computeTotal(
+export function computeTotalInRange(
   sessions: TimeSession[],
   capMs: number,
+  fromMs: number,
+  toMs: number,
   nowMs: number = Date.now()
 ): TotalResult {
   let ms = 0;
@@ -106,21 +114,34 @@ export function computeTotal(
   for (const s of sessions) {
     const start = Date.parse(s.start);
     if (isNaN(start)) continue;
+
+    let stop: number;
     if (s.stop === null) {
-      running = true;
-      const elapsed = nowMs - start;
-      if (elapsed > capMs) {
-        flagged = true;
-        ms += capMs;
-      } else {
-        ms += Math.max(0, elapsed);
+      const capped = nowMs - start > capMs;
+      stop = capped ? start + capMs : nowMs;
+      if (start < toMs && stop > fromMs) {
+        running = true;
+        if (capped) flagged = true;
       }
     } else {
-      const stop = Date.parse(s.stop);
-      if (!isNaN(stop)) ms += Math.max(0, stop - start);
+      stop = Date.parse(s.stop);
+      if (isNaN(stop)) continue;
     }
+
+    const a = Math.max(start, fromMs);
+    const b = Math.min(stop, toMs);
+    if (b > a) ms += b - a;
   }
   return { ms, flagged, running };
+}
+
+/** Total tracked time over all of history. */
+export function computeTotal(
+  sessions: TimeSession[],
+  capMs: number,
+  nowMs: number = Date.now()
+): TotalResult {
+  return computeTotalInRange(sessions, capMs, -Infinity, Infinity, nowMs);
 }
 
 /** Human-friendly duration: "1h 05m", "12m 03s", "44s". */

@@ -271,6 +271,68 @@ export class TaskStore {
   }
 
   /**
+   * Turn a note that already exists into a task, in place: Filo frontmatter is
+   * merged into whatever it already had, a `t-time` block is ensured, and the
+   * file is renamed to `<tasksFolder>/<id>.md` — the naming every other part of
+   * Filo relies on. `fileManager.renameFile` rewrites links pointing at it.
+   *
+   * Fields the note already carries (a `status`, a `due`) are kept; only what's
+   * missing is filled in. Used by the canvas digest to adopt note cards.
+   */
+  async adoptFile(
+    file: TFile,
+    input: { title?: string; parent?: string | null }
+  ): Promise<Task> {
+    const folder = this.folder();
+    await this.ensureFolder(folder);
+
+    const id = generateTaskId();
+    const created = new Date().toISOString();
+    const title = input.title?.trim() || file.basename;
+
+    // Ensure the timer block before the frontmatter pass, so the body rewrite
+    // and the YAML rewrite never race on the same file.
+    const content = await this.app.vault.read(file);
+    const withBlock = writeSessions(content, parseSessions(content));
+    if (withBlock !== content) await this.app.vault.modify(file, withBlock);
+
+    await this.app.fileManager.processFrontMatter(file, (fm) => {
+      fm.id = id;
+      fm.title = title;
+      fm.parent = input.parent ?? null;
+      fm.created = created;
+      if (fm.status == null) fm.status = "undone";
+      if (fm.due === undefined) fm.due = null;
+      if (fm.tags == null) fm.tags = [];
+      if (fm.priority == null) fm.priority = 0;
+    });
+
+    const path = `${folder}/${id}.md`;
+    if (file.path !== path) await this.app.fileManager.renameFile(file, path);
+    this.invalidate();
+
+    const adopted = await this.getTask(id);
+    if (adopted) return adopted;
+    // The rescan should always find it; fall back to what we just wrote rather
+    // than failing the whole digest over a stale read.
+    return {
+      id,
+      title,
+      status: "undone",
+      parent: input.parent ?? null,
+      due: null,
+      tags: [],
+      priority: 0,
+      created,
+      sessions: [],
+      path,
+      recurring: false,
+      cadence: null,
+      lastReset: null,
+    };
+  }
+
+  /**
    * Update frontmatter fields via processFrontMatter (which mutates only the
    * YAML and preserves the body, rather than naive string replacement).
    */
