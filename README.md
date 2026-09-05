@@ -128,12 +128,19 @@ When you open a task file, **task controls** appear in the note's top action bar
 (the icon row at the top, alongside the other view actions):
 
 - a **start/stop timer** toggle (▶ when stopped, ■ while running; total tracked
-  time in its tooltip);
+  time in its tooltip); stopping also clears a Slack status Filo set;
+- **post as Slack status** (📣) — sets your Slack custom status to this task's
+  title (see [Slack status](#slack-status));
+- **rename task** (✎) — prompts for a new name and rewrites both places it
+  lives, the `title` property and the H1 heading (see [Renaming](#renaming));
+- **copy task tree** (⧉) — a fresh, undone copy of this task and its subtree
+  (see [Copying a tree](#copying-a-tree));
 - **go to parent task** (↖, shown only when the task has a parent);
 - **go to child task** (↘, shown only when the task has children — opens the
   single child, or pops a menu to pick when there are several);
 - **open task canvas** (▦) — builds/refreshes an Obsidian Canvas holding this
-  task and its subtree, then opens it (see [Task canvas](#task-canvas)).
+  task's whole tree, then opens it. Works from any task in the tree, not just
+  its root (see [Task canvas](#task-canvas)).
 
 They work in both reading and editing modes and stay in sync as tasks change.
 
@@ -141,6 +148,82 @@ The **bottom status bar** shows your **current task** — the one being timed if
 timer is running (with live elapsed time), otherwise the last task you opened.
 Click it to jump straight to that task. The current task is remembered across
 reloads.
+
+### Searching tasks
+
+**Filo: Search tasks** opens a quick switcher over your tasks *only* — the
+point being that Obsidian's own switcher and global search span the whole
+vault and bury tasks among ordinary notes. It's a plain command, so bind it to
+a hotkey in **Settings → Hotkeys** (search "Filo").
+
+- Fuzzy matching over **title and tags** — the same pair the inline `/t`
+  autocomplete uses, so the two behave alike. Matched characters are
+  highlighted in the title.
+- **Title matches always rank above tag-only matches.** Fuzzy scores scale with
+  the length of the text they're measured against, so a short exact tag would
+  otherwise outrank a longer title containing the very word you typed.
+- Each row shows the status glyph, the title, the **parent task's title** (two
+  subtasks in different trees often share a name), the due date, tags, and how
+  recently the note changed.
+- With an empty query it lists everything, most recently modified first, so
+  it opens on whatever you were last working on.
+- Enter opens the task in the current pane.
+
+Task *bodies* are not searched — this is a "jump to the task I mean" switcher,
+and full text is what Obsidian's own search is for.
+
+### Copying a tree
+
+The **copy button** (⧉) duplicates a task **and its whole subtree** as a fresh,
+undone tree. Built for re-running something: a checklist, a release process, a
+kata you work through repeatedly.
+
+**The originals are never touched** — not their status, their tracked time, or
+their notes.
+
+Each copy keeps its note verbatim: body, tags, priority, due date and recurrence
+settings all carry over. What resets is everything that belonged to the original
+run:
+
+| Carried over | Reset on the copy |
+| --- | --- |
+| title, body, tags, priority, due | new `id` |
+| `recurring`, `cadence` | `status` → `undone` |
+| the tree's shape | `t-time` block emptied |
+| | recurrence log emptied (header kept) |
+| | `created` / `lastReset` → now |
+
+The copied tasks are re-parented onto **each other**, so the structure is
+mirrored inside the copy rather than pointing back at the originals. The new
+root is **top-level**, making the copy its own tree with its own canvas.
+
+The dialog says how many notes it's about to write and lets you name the new
+root; descendants keep their titles. Also available as **Filo: Copy task tree**
+in the command palette.
+
+### Renaming
+
+A task's name is stored **twice**: as the `title` property, which is what Filo
+sorts, filters and links by, and as the H1 heading, which is what you actually
+read on the note and on its canvas card. The filename is the opaque id, so
+without that heading a note with hidden properties shows nothing readable.
+
+The **rename button** (✎) prompts for a new name (pre-filled and selected) and
+writes both together. Editing the `title` property directly — in Obsidian's
+properties editor, or via anything that calls `updateTask` — only changes one of
+them, which is how a note ends up titled one thing and headed another.
+
+What the rewrite does and doesn't touch:
+
+- It replaces the **first level-1 heading outside a fenced code block**. A `# `
+  inside a shell snippet is a comment, not a name, and `##` and deeper are the
+  note's own structure — both are left alone.
+- A note with no H1 at all (one adopted from a canvas, say) gets one inserted
+  just below the frontmatter, where `createTask` would have put it.
+- The name is flattened to one line, so a pasted multi-line title can't spill
+  out of the heading.
+- Renaming has no effect on the tree's canvas: boards are keyed by the root's
+  id, not its title — see [Canvas file naming](#canvas-file-naming).
 
 ## Code blocks
 
@@ -349,6 +432,10 @@ Details:
   active file is a task, with that task pre-selected as the parent.
 - **Filo: Load tasks (process recurring)** — scans recurring tasks and resets any
   whose cadence has elapsed (see **Recurring tasks** above).
+- **Filo: Search tasks** — task-scoped quick switcher; see
+  [Searching tasks](#searching-tasks).
+- **Filo: Copy task tree** — only shown in a task file; see
+  [Copying a tree](#copying-a-tree).
 - **Filo: Open task canvas** — see below.
 - **Filo: Digest canvas into tasks** — only shown on a canvas; see below.
 
@@ -358,11 +445,15 @@ Press the **canvas button** in a task note's top action bar (next to the timer
 and the parent/child nav buttons), or run **Filo: Open task canvas** from the
 command palette.
 
-- The button builds (or refreshes) the canvas for that task and opens it — in a
-  new tab, or by focusing and reloading the tab that already has it open.
-- From the command palette: if run from inside a task file that task is the
-  root; otherwise you're prompted to pick one.
-- It walks the subtree (`parent → child`) and writes an Obsidian Canvas into the
+- **A tree gets one canvas, and any task in it opens that canvas.** Filo climbs
+  `parent` from the task you pressed the button on to the outermost ancestor and
+  builds the board from there, so a deeply nested child shows the *whole* tree
+  rather than a partial board of its own subtree.
+- The button builds (or refreshes) that canvas and opens it — in a new tab, or
+  by focusing and reloading the tab that already has it open.
+- From the command palette: if run from inside a task file, that task's tree is
+  used; otherwise you're prompted to pick a task (any task in the tree will do).
+- It walks the tree (`parent → child`) and writes an Obsidian Canvas into the
   configured canvas folder, with `file` nodes pointing at each task note and
   edges from parent to child. Editing a node edits the task note itself.
 - Layout is an **inverted tree**: the root on top, each generation in a row
@@ -417,18 +508,31 @@ canvas button, then edit it freely.
 
 ### Canvas file naming
 
-The canvas is named after the **task's title** (`Ship Filo v2.canvas`), with
-characters a file name can't hold replaced by spaces.
+A tree's canvas is `<rootTaskId>.canvas` (e.g. `t-k3p9af2x.canvas`), in the
+configured canvas folder.
 
-Titles are neither stable nor unique, so the file is *looked up*, not just
-computed:
+The **id, not the title** — it's the one thing about a task that never changes,
+which makes the path a pure function of the tree's root:
 
-- The canvas rooted at the task is found wherever it sits in the canvas folder —
-  including under the old `<taskId>.canvas` name — and is **renamed to follow
-  the title** when the task is renamed, so manual layout survives.
-- If that name is already taken by an unrelated canvas (e.g. two tasks share a
-  title), the id is appended: `Ship Filo v2 (t-k3p9af2x).canvas`. Filo never
-  merges task nodes into a canvas that isn't its own.
+- every task in a tree resolves to the same board, with no lookup;
+- renaming a task can't move, orphan or duplicate its canvas;
+- two tasks sharing a title can't collide, so no disambiguating suffix is
+  needed;
+- there is no case where Filo has to rename a canvas to follow a title, or
+  decide whether a canvas at some name is really yours.
+
+The trade-off is that the filename isn't human-readable. The board's *tab* still
+shows the id, so if you want to find one in the file explorer, go via the root
+task's canvas button rather than by name.
+
+**Migration.** A canvas from the older title-based naming is picked up the first
+time you open that tree — Filo finds the board rooted at the task, wherever it
+sits in the folder, and moves it onto the id path with its hand-placed cards
+intact. After that the direct lookup hits and the scan never runs again.
+
+One exception: a board rooted at a task that is *not* the top of its tree can no
+longer be reached, since the canvas button now always climbs to the root. Those
+are leftovers from before that change and are safe to delete.
 
 ### Canvas color limitation
 
@@ -449,6 +553,54 @@ is a documented approximation, not a continuous gradient.
 - **Absolute mode:** fixed hour thresholds (0.25h / 1h / 2h / 4h / 8h) decide
   the bucket.
 
+## Slack status
+
+The **megaphone button** (📣) in a task note's action bar, next to the timer,
+sets your Slack custom status to that task's title. It's a deliberate press, not
+an automatic sync — nothing is sent until you ask for it.
+
+- The title is flattened to one line and truncated to Slack's **100-character**
+  limit; the emoji comes from the **Status emoji** setting (default `:mega:`).
+- The status has no expiry, so it stands until it's cleared on stop, you post
+  another, or you change it in Slack.
+- Filo shows a notice either way: the status it set, or why Slack refused.
+
+### Clearing on stop
+
+**Stopping a timer clears the status.** That covers every way a timer stops —
+the note's ■ button, the `t-time` and `t-list` widgets, and the implicit stop
+when you start a *different* task's timer.
+
+Filo only clears a status **it set**. It remembers the text it last posted (in
+`data.json`), and a stop with nothing recorded is a silent no-op — so stopping a
+timer never wipes an "In a meeting" you set by hand, and people who don't use
+the Slack button see nothing at all.
+
+The catch: that's bookkeeping, not a live read. Checking your *actual* current
+status before clearing would need the `users.profile:read` scope, and adding a
+scope means reinstalling the app for a fresh token. So if you post from Filo and
+then change your status by hand, the next stop still clears it.
+
+If a clear fails (offline, rate-limited), Filo says so and keeps the status
+marked as its own, so the next stop retries rather than leaving it stranded.
+
+### Getting a token
+
+`users.profile.set` requires a **user** token — a bot token cannot set a human's
+status, whatever scopes it carries. Since it's a user token for your own
+workspace, there's no OAuth flow to host:
+
+1. Create an app at [api.slack.com/apps](https://api.slack.com/apps) → **From
+   scratch**, pointed at your workspace.
+2. **OAuth & Permissions** → **User Token Scopes** → add `users.profile:write`.
+   Note *User* Token Scopes, not Bot Token Scopes.
+3. **Install to Workspace**, approve, and copy the **User OAuth Token**
+   (`xoxp-…`).
+4. Paste it into Filo's settings under **Slack → User token**.
+
+The token is stored in plain text in this plugin's `data.json`. That file is
+gitignored, but it is not encrypted and it will travel with any vault sync.
+
 ## Settings
 
 - **Tasks folder** — where task files live (default `tasks`).
@@ -465,6 +617,9 @@ is a documented approximation, not a continuous gradient.
 - **Hide completed tasks** — omit done tasks from the dropdown (default off).
 - **Parent banner on task notes** — show the click-to-change parent title banner
   (default on).
+- **Slack → User token** — `xoxp-` user token with `users.profile:write`
+  (default empty; the button reports what's missing until it's set).
+- **Slack → Status emoji** — emoji posted with the title (default `:mega:`).
 
 ## Project layout
 
@@ -477,19 +632,23 @@ src/
     id.ts                 stable random id generation
     timeBlock.ts          t-time parse/serialize + total/format
     recurrence.ts         cron parsing + recurrence-log table read/write
-    mtime.ts              file-mtime lookup + "most recently modified" ordering
-    TaskStore.ts          core service layer (CRUD, tree, timers, recurrence, cache)
+    mtime.ts              file-mtime lookup, recency ordering + relative time
+    TaskStore.ts          core service layer (CRUD, tree, copy, timers, recurrence)
   dsl/filter.ts           t-list DSL parser + matcher + sort
   processors/
+    renameTaskModal.ts    rename prompt (title property + H1 together)
+    copyTaskModal.ts      subtree-copy confirm + new root title
     addProcessor.ts       t-add widget
     listProcessor.ts      t-list widget (live ticks, lifecycle cleanup)
     timeProcessor.ts      t-time widget (start/stop buttons, live total)
   ui/
-    fileTimerButton.ts    in-file timer, parent/child nav, canvas actions
+    fileTimerButton.ts    timer, Slack, rename, copy, parent/child nav, canvas
     canvasActions.ts      digest button on Filo canvases
     statusBar.ts          bottom-bar current-task indicator
     taskSuggest.ts        inline `/t` task-reference autocomplete
+    taskSearchModal.ts    task-scoped quick switcher (fuzzy over title + tags)
     parentBanner.ts       parent-by-title banner + cycle-safe parent picker
   canvas/canvasImport.ts  subtree → canvas (title-named, position-preserving merge)
   canvas/canvasDigest.ts  canvas → tasks (create/adopt cards, re-parent by edge)
+  slack/slackStatus.ts    task title → Slack custom status (users.profile.set)
 ```

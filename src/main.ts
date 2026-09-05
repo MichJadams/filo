@@ -6,13 +6,16 @@ import { AddWidget } from "./processors/addProcessor";
 import { ListWidget } from "./processors/listProcessor";
 import { TimeWidget } from "./processors/timeProcessor";
 import { CreateTaskModal } from "./processors/createTaskModal";
+import { CopyTaskModal } from "./processors/copyTaskModal";
 import { FileTimerManager } from "./ui/fileTimerButton";
 import { CurrentTaskStatus } from "./ui/statusBar";
 import { TaskLinkSuggest } from "./ui/taskSuggest";
+import { TaskSearchModal } from "./ui/taskSearchModal";
 import { ParentBannerManager } from "./ui/parentBanner";
 import { CanvasActionManager } from "./ui/canvasActions";
 import { TaskPickerModal, openTaskCanvas } from "./canvas/canvasImport";
 import { digestCanvas } from "./canvas/canvasDigest";
+import { clearSlackStatus } from "./slack/slackStatus";
 
 /** Shape persisted via loadData/saveData. */
 interface FiloData {
@@ -21,6 +24,12 @@ interface FiloData {
   activeTaskId: string | null;
   /** Last task file opened; the "current task" fallback when no timer runs. */
   lastTaskId: string | null;
+  /**
+   * The status text Filo last pushed to Slack, or null when it hasn't pushed
+   * one (or has since cleared it). Persisted so a restart doesn't leave a
+   * Filo-set status that nothing will clean up.
+   */
+  slackStatusText: string | null;
 }
 
 export default class FiloPlugin extends Plugin implements FiloDataAccess {
@@ -28,6 +37,8 @@ export default class FiloPlugin extends Plugin implements FiloDataAccess {
   store!: TaskStore;
   private activeTaskId: string | null = null;
   private lastTaskId: string | null = null;
+  /** See `FiloData.slackStatusText`. Read by the Slack module. */
+  slackStatusText: string | null = null;
   private fileTimer!: FileTimerManager;
   private parentBanner!: ParentBannerManager;
   private canvasActions!: CanvasActionManager;
@@ -93,6 +104,24 @@ export default class FiloPlugin extends Plugin implements FiloDataAccess {
       checkCallback: (checking) => {
         if (!this.activeTaskFilePath()) return false;
         if (!checking) void this.openCreateTask();
+        return true;
+      },
+    });
+
+    // Task-scoped quick switcher. No checkCallback: it's meant to be reachable
+    // from anywhere in the vault, which is the point of it.
+    this.addCommand({
+      id: "search-tasks",
+      name: "Search tasks",
+      callback: () => void this.openTaskSearch(),
+    });
+
+    this.addCommand({
+      id: "copy-task-tree",
+      name: "Copy task tree",
+      checkCallback: (checking) => {
+        if (!this.activeTaskFilePath()) return false;
+        if (!checking) void this.openCopyTask();
         return true;
       },
     });
@@ -245,6 +274,26 @@ export default class FiloPlugin extends Plugin implements FiloDataAccess {
     return f.path.startsWith(folder + "/") ? f.path : null;
   }
 
+  /** Open the task-scoped search dialog. */
+  private async openTaskSearch(): Promise<void> {
+    const tasks = await this.store.listTasks();
+    if (!tasks.length) {
+      new Notice("Filo: no tasks to search.");
+      return;
+    }
+    new TaskSearchModal(this.app, this, tasks).open();
+  }
+
+  /** Open the copy dialog for the task whose file is active. */
+  private async openCopyTask(): Promise<void> {
+    const path = this.activeTaskFilePath();
+    if (!path) return;
+    const task = (await this.store.listTasks()).find((t) => t.path === path);
+    if (!task) return;
+    const count = (await this.store.getSubtree(task.id)).length;
+    new CopyTaskModal(this.app, this, task, count).open();
+  }
+
   /** Open the create-task modal, defaulting the parent to the active task (if any). */
   private async openCreateTask(): Promise<void> {
     const path = this.activeTaskFilePath();
@@ -274,23 +323,24 @@ export default class FiloPlugin extends Plugin implements FiloDataAccess {
   }
 
   private async runCanvasImport(): Promise<void> {
-    // If invoked from inside a task file, use that task as the root.
+    // If invoked from inside a task file, open that task's tree; `openTaskCanvas`
+    // resolves the root, so any task in the tree gets the same canvas.
     const active = this.app.workspace.getActiveFile();
     const tasks = await this.store.listTasks();
-    let rootId: string | null = null;
+    let taskId: string | null = null;
     if (active instanceof TFile) {
-      rootId = tasks.find((t) => t.path === active.path)?.id ?? null;
+      taskId = tasks.find((t) => t.path === active.path)?.id ?? null;
     }
 
-    if (rootId) {
-      await openTaskCanvas(this, rootId);
+    if (taskId) {
+      await openTaskCanvas(this, taskId);
       return;
     }
     if (!tasks.length) {
       new Notice("Filo: no tasks to import.");
       return;
     }
-    // Otherwise prompt to pick a root task.
+    // Otherwise prompt to pick a task.
     new TaskPickerModal(this.app, tasks, (t) => void openTaskCanvas(this, t.id)).open();
   }
 
@@ -308,6 +358,19 @@ export default class FiloPlugin extends Plugin implements FiloDataAccess {
   async setActiveTaskId(id: string | null): Promise<void> {
     this.activeTaskId = id;
     await this.persist();
+
+    // Every stop path funnels through here — the note's timer button, the
+    // `t-time` and `t-list` widgets, and the implicit stop when another task's
+    // timer starts — so it's the one place a Slack clear has to be wired in.
+    // Deliberately NOT awaited: stopping a timer shouldn't block on a network
+    // round-trip, and `clearSlackStatus` reports its own failures.
+    if (id === null) void clearSlackStatus(this);
+  }
+
+  /** Record (and persist) what Filo last pushed to Slack; null = nothing of ours. */
+  async setSlackStatusText(text: string | null): Promise<void> {
+    this.slackStatusText = text;
+    await this.persist();
   }
 
   // --- persistence ---------------------------------------------------------
@@ -317,6 +380,7 @@ export default class FiloPlugin extends Plugin implements FiloDataAccess {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data?.settings ?? {});
     this.activeTaskId = data?.activeTaskId ?? null;
     this.lastTaskId = data?.lastTaskId ?? null;
+    this.slackStatusText = data?.slackStatusText ?? null;
   }
 
   private async persist(): Promise<void> {
@@ -324,6 +388,7 @@ export default class FiloPlugin extends Plugin implements FiloDataAccess {
       settings: this.settings,
       activeTaskId: this.activeTaskId,
       lastTaskId: this.lastTaskId,
+      slackStatusText: this.slackStatusText,
     };
     await this.saveData(data);
   }

@@ -3,9 +3,14 @@ import type FiloPlugin from "../main";
 import { readCanvas } from "../canvas/canvasImport";
 import { digestCanvas } from "../canvas/canvasDigest";
 
-/** Per-leaf state. Rebuilt when a leaf swaps to a different canvas file. */
+/**
+ * Per-leaf state. Rebuilt when a leaf swaps to a different canvas file, or when
+ * its view is replaced — the button lives in the view's header, so a reload
+ * takes the element with it.
+ */
 interface CanvasRecord {
   path: string;
+  view: ItemView;
   el: HTMLElement;
 }
 
@@ -44,7 +49,11 @@ export class CanvasActionManager {
       live.add(leaf);
 
       let rec = this.records.get(leaf);
-      if (rec && rec.path !== file.path) {
+      // Two ways a record goes stale: the leaf swapped to another canvas, or
+      // the leaf reloaded and got a brand-new view. The latter is what the
+      // digest itself causes — it rebuilds the board and reopens it — so
+      // without the view check the button would vanish on the first press.
+      if (rec && (rec.path !== file.path || rec.view !== view)) {
         rec.el.remove();
         this.records.delete(leaf);
         rec = undefined;
@@ -54,7 +63,7 @@ export class CanvasActionManager {
           void this.digest(file)
         );
         el.addClass("filo-canvas-digest");
-        rec = { path: file.path, el };
+        rec = { path: file.path, view, el };
         this.records.set(leaf, rec);
       }
 
@@ -83,6 +92,10 @@ export class CanvasActionManager {
       console.error("[Filo] canvas digest failed", e);
       new Notice("Filo: failed to digest canvas");
     }
+    // The digest reopens the board, so by now this leaf is on a new view whose
+    // header has no button. The workspace events fire during that reload rather
+    // than after it, so redraw here instead of relying on one landing late.
+    await this.update();
   }
 
   /** Remove all buttons (called on plugin unload). */

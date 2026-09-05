@@ -26,7 +26,7 @@ __export(main_exports, {
   default: () => FiloPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian15 = require("obsidian");
+var import_obsidian19 = require("obsidian");
 
 // src/settings.ts
 var import_obsidian = require("obsidian");
@@ -40,7 +40,9 @@ var DEFAULT_SETTINGS = {
   taskLinkTrigger: "/t",
   taskLinkMaxResults: 20,
   taskLinkHideDone: false,
-  parentBanner: true
+  parentBanner: true,
+  slackToken: "",
+  slackStatusEmoji: ":mega:"
 };
 var FiloSettingTab = class extends import_obsidian.PluginSettingTab {
   constructor(app, plugin) {
@@ -124,6 +126,22 @@ var FiloSettingTab = class extends import_obsidian.PluginSettingTab {
     ).addToggle(
       (t) => t.setValue(this.plugin.settings.parentBanner).onChange(async (v) => {
         this.plugin.settings.parentBanner = v;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Slack").setHeading();
+    new import_obsidian.Setting(containerEl).setName("User token").setDesc(
+      "Slack user token (xoxp-) with the users.profile:write scope. Create an app at api.slack.com/apps, add that User Token Scope, and install it to your workspace. A bot token will not work \u2014 Slack only lets a user token set a human's status. Stored in plain text in this plugin's data.json."
+    ).addText((t) => {
+      t.inputEl.type = "password";
+      t.setPlaceholder("xoxp-\u2026").setValue(this.plugin.settings.slackToken).onChange(async (v) => {
+        this.plugin.settings.slackToken = v.trim();
+        await this.plugin.saveSettings();
+      });
+    });
+    new import_obsidian.Setting(containerEl).setName("Status emoji").setDesc("Emoji posted alongside the task title, in :name: form.").addText(
+      (t) => t.setPlaceholder(":mega:").setValue(this.plugin.settings.slackStatusEmoji).onChange(async (v) => {
+        this.plugin.settings.slackStatusEmoji = v.trim();
         await this.plugin.saveSettings();
       })
     );
@@ -333,6 +351,33 @@ ${LOG_MARKER}
 | --- | --- |
 `;
 }
+function clearLogEntries(content) {
+  const lines = content.split("\n");
+  const markerIdx = lines.findIndex((l) => l.trim() === LOG_MARKER);
+  if (markerIdx === -1)
+    return content;
+  let first = -1;
+  let last = -1;
+  for (let i = markerIdx + 1; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (t === "") {
+      if (last !== -1)
+        break;
+      continue;
+    }
+    if (t.startsWith("|")) {
+      if (first === -1)
+        first = i;
+      last = i;
+      continue;
+    }
+    break;
+  }
+  if (first === -1 || last < first + 2)
+    return content;
+  lines.splice(first + 2, last - (first + 1));
+  return lines.join("\n");
+}
 function appendLogEntry(content, date, status) {
   const row = `| ${date} | ${status} |`;
   const lines = content.split("\n");
@@ -369,6 +414,31 @@ var STATUSES = ["undone", "in-progress", "done"];
 function headingLine(title) {
   const flat = (title != null ? title : "").replace(/\s+/g, " ").trim();
   return flat || "Untitled";
+}
+function writeHeading(content, title) {
+  var _a;
+  const heading = `# ${headingLine(title)}`;
+  const lines = content.split("\n");
+  let i = 0;
+  if (((_a = lines[0]) == null ? void 0 : _a.trim()) === "---") {
+    const end = lines.findIndex((l, n) => n > 0 && l.trim() === "---");
+    if (end > 0)
+      i = end + 1;
+  }
+  const bodyStart = i;
+  let inFence = false;
+  for (; i < lines.length; i++) {
+    if (/^\s*(```|~~~)/.test(lines[i])) {
+      inFence = !inFence;
+      continue;
+    }
+    if (!inFence && /^#\s+/.test(lines[i])) {
+      lines[i] = heading;
+      return lines.join("\n");
+    }
+  }
+  lines.splice(bodyStart, 0, "", heading);
+  return lines.join("\n");
 }
 var TaskStore = class {
   constructor(app, data) {
@@ -654,6 +724,91 @@ ${(0, import_obsidian2.stringifyYaml)(fm)}---
     });
     this.invalidate();
   }
+  /**
+   * Rename a task, keeping in sync the two places its name lives: the `title`
+   * frontmatter property and the H1 heading in the body.
+   *
+   * `updateTask({ title })` only rewrites the property, which is how a note ends
+   * up with a heading that disagrees with its title — the heading is what you
+   * read on the note and on its canvas card, so the two drifting apart is worse
+   * than either being wrong.
+   *
+   * Body first, then YAML: two writers on one file race otherwise (the same
+   * ordering `adoptFile` uses, for the same reason).
+   */
+  async renameTask(id, title) {
+    const file = await this.fileForId(id);
+    if (!file)
+      throw new Error(`[Filo] task not found: ${id}`);
+    const next = title.trim();
+    if (!next)
+      throw new Error("[Filo] a task needs a title");
+    await this.app.vault.process(file, (content) => writeHeading(content, next));
+    await this.app.fileManager.processFrontMatter(file, (fm) => {
+      fm.title = next;
+    });
+    this.invalidate();
+  }
+  /**
+   * Duplicate the subtree rooted at `rootId` as a fresh, undone tree, leaving
+   * the originals completely untouched. Returns the new root.
+   *
+   * Each copy keeps its note **verbatim** — body, tags, priority, due date,
+   * recurrence settings — and resets only what belonged to the original run: a
+   * new id, `undone` status, an empty timer block, an empty recurrence log, and
+   * `created` set to now. Copying the file and clearing those in place beats
+   * reassembling a note from parsed parts, which would quietly drop anything
+   * the parser doesn't model.
+   *
+   * The copies are re-parented onto each other, so the structure is mirrored
+   * within the copy rather than pointing back at the originals. The new root is
+   * detached to top level, making the copy its own tree with its own canvas.
+   *
+   * `newRootTitle` renames just the copied root; descendants keep their titles.
+   */
+  async copySubtree(rootId, newRootTitle) {
+    const nodes = await this.getSubtree(rootId);
+    if (!nodes.length)
+      throw new Error(`[Filo] task not found: ${rootId}`);
+    const folder = this.folder();
+    await this.ensureFolder(folder);
+    const sources = /* @__PURE__ */ new Map();
+    for (const n of nodes) {
+      const f = this.app.vault.getAbstractFileByPath(n.task.path);
+      if (!(f instanceof import_obsidian2.TFile)) {
+        throw new Error(`[Filo] missing task file: ${n.task.path}`);
+      }
+      sources.set(n.task.id, f);
+    }
+    const idMap = /* @__PURE__ */ new Map();
+    for (const n of nodes)
+      idMap.set(n.task.id, generateTaskId());
+    const created = new Date().toISOString();
+    for (const n of nodes) {
+      const newId = idMap.get(n.task.id);
+      let content = writeSessions(await this.app.vault.read(sources.get(n.task.id)), []);
+      content = clearLogEntries(content);
+      const renameRoot = n.task.id === rootId && !!newRootTitle;
+      if (renameRoot)
+        content = writeHeading(content, newRootTitle);
+      const file = await this.app.vault.create(`${folder}/${newId}.md`, content);
+      await this.app.fileManager.processFrontMatter(file, (fm) => {
+        var _a;
+        fm.id = newId;
+        fm.status = "undone";
+        fm.parent = n.task.id === rootId ? null : (_a = idMap.get(n.task.parent)) != null ? _a : null;
+        fm.created = created;
+        fm.lastReset = fm.recurring ? created : null;
+        if (renameRoot)
+          fm.title = newRootTitle;
+      });
+    }
+    this.invalidate();
+    const copy = await this.getTask(idMap.get(rootId));
+    if (!copy)
+      throw new Error("[Filo] copy failed: the new root was not found");
+    return copy;
+  }
   async setStatus(id, status) {
     await this.updateTask(id, { status });
   }
@@ -708,6 +863,29 @@ ${(0, import_obsidian2.stringifyYaml)(fm)}---
   // --- tree ----------------------------------------------------------------
   async getChildren(id) {
     return (await this.listTasks()).filter((t) => t.parent === id);
+  }
+  /**
+   * Walk up `parent` from `id` to the top of its tree, returning the outermost
+   * ancestor (or `id` itself when it has no parent). A dangling `parent` — one
+   * pointing at a task that no longer exists — stops the climb where it is, and
+   * a `seen` set guards against a parent cycle looping forever.
+   *
+   * Returns null when `id` isn't a task at all.
+   */
+  async getRoot(id) {
+    var _a;
+    const all = await this.listTasks();
+    const byId = new Map(all.map((t) => [t.id, t]));
+    let task = (_a = byId.get(id)) != null ? _a : null;
+    const seen = /* @__PURE__ */ new Set();
+    while ((task == null ? void 0 : task.parent) && !seen.has(task.id)) {
+      seen.add(task.id);
+      const parent = byId.get(task.parent);
+      if (!parent)
+        break;
+      task = parent;
+    }
+    return task;
   }
   /**
    * Flatten the subtree rooted at `rootId` (depth-first), annotating each node
@@ -1701,11 +1879,75 @@ var CreateTaskModal = class extends import_obsidian6.Modal {
   }
 };
 
+// src/processors/copyTaskModal.ts
+var import_obsidian7 = require("obsidian");
+var CopyTaskModal = class extends import_obsidian7.Modal {
+  constructor(app, plugin, task, count) {
+    super(app);
+    this.plugin = plugin;
+    this.task = task;
+    this.count = count;
+    this.titleVal = task.title;
+  }
+  onOpen() {
+    var _a, _b;
+    const { contentEl, titleEl } = this;
+    titleEl.setText("Copy task tree");
+    contentEl.empty();
+    const others = this.count - 1;
+    contentEl.createEl("p", {
+      text: others > 0 ? `Copies "${this.task.title}" and its ${others} subtask${others === 1 ? "" : "s"}.` : `Copies "${this.task.title}".`
+    });
+    contentEl.createEl("p", {
+      cls: "filo-copy-note",
+      text: "The copies start undone with timers and recurrence logs cleared, as a new top-level tree. The originals are not touched."
+    });
+    const refs = {};
+    new import_obsidian7.Setting(contentEl).setName("New root title").addText((t) => {
+      refs.title = t.inputEl;
+      t.setValue(this.titleVal);
+      t.onChange((v) => this.titleVal = v);
+      t.inputEl.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          void this.submit();
+        }
+      });
+    });
+    new import_obsidian7.Setting(contentEl).addButton(
+      (b) => b.setButtonText("Copy").setCta().onClick(() => void this.submit())
+    );
+    (_a = refs.title) == null ? void 0 : _a.focus();
+    (_b = refs.title) == null ? void 0 : _b.select();
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+  async submit() {
+    const title = this.titleVal.trim();
+    if (!title) {
+      new import_obsidian7.Notice("Filo: title required");
+      return;
+    }
+    try {
+      const copy = await this.plugin.store.copySubtree(this.task.id, title);
+      new import_obsidian7.Notice(
+        `Filo: copied ${this.count} task${this.count === 1 ? "" : "s"} to "${copy.title}"`
+      );
+      this.close();
+      await this.plugin.openTaskFile(copy);
+    } catch (e) {
+      console.error("[Filo] copy failed", e);
+      new import_obsidian7.Notice("Filo: failed to copy task tree");
+    }
+  }
+};
+
 // src/ui/fileTimerButton.ts
-var import_obsidian8 = require("obsidian");
+var import_obsidian11 = require("obsidian");
 
 // src/canvas/canvasImport.ts
-var import_obsidian7 = require("obsidian");
+var import_obsidian8 = require("obsidian");
 var NODE_W = 640;
 var NODE_H = 640;
 var LEGACY_SIZES = [[260, 80]];
@@ -1773,12 +2015,6 @@ function sizeFor(prev) {
   }
   return { width: prev.width, height: prev.height };
 }
-var ILLEGAL_NAME_CHARS = /[\\/:*?"<>|#^[\]]/g;
-var MAX_NAME_LEN = 80;
-function canvasFileName(title, fallback) {
-  const cleaned = title.replace(ILLEGAL_NAME_CHARS, " ").replace(/\s+/g, " ").trim().slice(0, MAX_NAME_LEN).replace(/^\.+|[.\s]+$/g, "");
-  return cleaned || fallback;
-}
 var TASK_EDGE_PREFIX = "e-t-";
 async function readCanvas(app, file) {
   try {
@@ -1801,47 +2037,30 @@ async function isCanvasRootedAt(app, file, rootId) {
 }
 async function resolveCanvasPath(plugin, root) {
   const app = plugin.app;
-  const folder = (0, import_obsidian7.normalizePath)(plugin.settings.canvasFolder || "");
-  const join = (name2) => folder ? `${folder}/${name2}.canvas` : `${name2}.canvas`;
-  const name = canvasFileName(root.title, root.id);
-  const titlePath = join(name);
-  const atTitle = app.vault.getAbstractFileByPath(titlePath);
-  if (atTitle instanceof import_obsidian7.TFile && await isCanvasRootedAt(app, atTitle, root.id)) {
-    return titlePath;
-  }
-  let existing = null;
-  const legacy = app.vault.getAbstractFileByPath(join(root.id));
-  if (legacy instanceof import_obsidian7.TFile && await isCanvasRootedAt(app, legacy, root.id)) {
-    existing = legacy;
-  } else {
-    const prefix = folder ? folder + "/" : "";
-    for (const f of app.vault.getFiles()) {
-      if (f.extension !== "canvas")
-        continue;
-      if (!f.path.startsWith(prefix))
-        continue;
-      if (f.path.slice(prefix.length).includes("/"))
-        continue;
-      if (await isCanvasRootedAt(app, f, root.id)) {
-        existing = f;
-        break;
-      }
+  const folder = (0, import_obsidian8.normalizePath)(plugin.settings.canvasFolder || "");
+  const idPath = folder ? `${folder}/${root.id}.canvas` : `${root.id}.canvas`;
+  if (app.vault.getAbstractFileByPath(idPath) instanceof import_obsidian8.TFile)
+    return idPath;
+  const prefix = folder ? folder + "/" : "";
+  for (const f of app.vault.getFiles()) {
+    if (f.extension !== "canvas")
+      continue;
+    if (!f.path.startsWith(prefix))
+      continue;
+    if (f.path.slice(prefix.length).includes("/"))
+      continue;
+    if (await isCanvasRootedAt(app, f, root.id)) {
+      await app.fileManager.renameFile(f, idPath);
+      return idPath;
     }
   }
-  if (existing) {
-    if (!atTitle) {
-      await app.fileManager.renameFile(existing, titlePath);
-      return titlePath;
-    }
-    return existing.path;
-  }
-  return atTitle ? join(`${name} (${root.id})`) : titlePath;
+  return idPath;
 }
 async function importTaskTreeToCanvas(plugin, rootId, target) {
   const store = plugin.store;
   const nodes = await store.getSubtree(rootId);
   if (!nodes.length) {
-    new import_obsidian7.Notice("Filo: no task found to import.");
+    new import_obsidian8.Notice("Filo: no task found to import.");
     return null;
   }
   const capMs = plugin.getTimerCapMs();
@@ -1853,14 +2072,14 @@ async function importTaskTreeToCanvas(plugin, rootId, target) {
     if (ms > maxMs)
       maxMs = ms;
   }
-  const folder = (0, import_obsidian7.normalizePath)(plugin.settings.canvasFolder || "");
+  const folder = (0, import_obsidian8.normalizePath)(plugin.settings.canvasFolder || "");
   if (!target && folder && !plugin.app.vault.getAbstractFileByPath(folder)) {
     await plugin.app.vault.createFolder(folder).catch(() => {
     });
   }
   const canvasPath = target ? target.path : await resolveCanvasPath(plugin, nodes[0].task);
   const existingFile = target != null ? target : plugin.app.vault.getAbstractFileByPath(canvasPath);
-  const existing = existingFile instanceof import_obsidian7.TFile ? await readCanvas(plugin.app, existingFile) : { nodes: [], edges: [] };
+  const existing = existingFile instanceof import_obsidian8.TFile ? await readCanvas(plugin.app, existingFile) : { nodes: [], edges: [] };
   const prevById = new Map(existing.nodes.map((n) => [n.id, n]));
   const taskIds = new Set(nodes.map((n) => n.task.id));
   const ideal = layoutTree(nodes);
@@ -1917,9 +2136,9 @@ async function importTaskTreeToCanvas(plugin, rootId, target) {
   const json = JSON.stringify(out, null, 2);
   const announce = (msg) => {
     if (!target)
-      new import_obsidian7.Notice(msg);
+      new import_obsidian8.Notice(msg);
   };
-  if (existingFile instanceof import_obsidian7.TFile) {
+  if (existingFile instanceof import_obsidian8.TFile) {
     await plugin.app.vault.modify(existingFile, json);
     announce(
       relayout ? `Filo: re-laid out canvas for the larger cards (${taskNodes.length} tasks).` : `Filo: updated canvas (${taskNodes.length} tasks).`
@@ -1930,29 +2149,40 @@ async function importTaskTreeToCanvas(plugin, rootId, target) {
   announce(`Filo: created canvas (${taskNodes.length} tasks).`);
   return created;
 }
-async function openTaskCanvas(plugin, rootId) {
-  const file = await importTaskTreeToCanvas(plugin, rootId);
+async function openTaskCanvas(plugin, taskId) {
+  const root = await plugin.store.getRoot(taskId);
+  if (!root) {
+    new import_obsidian8.Notice("Filo: no task found to import.");
+    return;
+  }
+  const file = await importTaskTreeToCanvas(plugin, root.id);
   if (file)
     await revealCanvas(plugin, file);
 }
-async function revealCanvas(plugin, file) {
-  var _a;
+function findCanvasLeaf(plugin, path) {
   for (const leaf of plugin.app.workspace.getLeavesOfType("canvas")) {
-    const open = leaf.view.file;
-    if ((open == null ? void 0 : open.path) !== file.path)
-      continue;
-    (_a = leaf.rebuildView) == null ? void 0 : _a.call(leaf);
-    plugin.app.workspace.revealLeaf(leaf);
+    const state = leaf.getViewState().state;
+    if ((state == null ? void 0 : state.file) === path)
+      return leaf;
+  }
+  return null;
+}
+async function revealCanvas(plugin, file) {
+  const leaf = findCanvasLeaf(plugin, file.path);
+  if (leaf) {
+    await leaf.setViewState({ type: "empty" });
+    await leaf.openFile(file);
+    await plugin.app.workspace.revealLeaf(leaf);
     return;
   }
   await plugin.app.workspace.getLeaf("tab").openFile(file);
 }
-var TaskPickerModal = class extends import_obsidian7.FuzzySuggestModal {
+var TaskPickerModal = class extends import_obsidian8.FuzzySuggestModal {
   constructor(app, tasks, onChoose) {
     super(app);
     this.tasks = tasks;
     this.onChoose = onChoose;
-    this.setPlaceholder("Pick the root task to import\u2026");
+    this.setPlaceholder("Pick a task to open the canvas for\u2026");
   }
   getItems() {
     return this.tasks;
@@ -1962,6 +2192,143 @@ var TaskPickerModal = class extends import_obsidian7.FuzzySuggestModal {
   }
   onChooseItem(task) {
     this.onChoose(task);
+  }
+};
+
+// src/slack/slackStatus.ts
+var import_obsidian9 = require("obsidian");
+var ENDPOINT = "https://slack.com/api/users.profile.set";
+var MAX_STATUS_LEN = 100;
+var ERROR_HINTS = {
+  not_authed: "no token \u2014 add one in Filo's settings",
+  invalid_auth: "the token was rejected \u2014 check it in Filo's settings",
+  token_revoked: "the token was revoked \u2014 reinstall the Slack app for a new one",
+  token_expired: "the token expired \u2014 reinstall the Slack app for a new one",
+  missing_scope: "the token is missing the users.profile:write scope",
+  invalid_profile: "Slack rejected the status \u2014 is the emoji name real?",
+  profile_set_failed: "Slack refused the update; try again in a moment",
+  ratelimited: "too many updates \u2014 wait a moment and try again"
+};
+function statusTextFor(title) {
+  const flat = title.replace(/\s+/g, " ").trim();
+  return flat.length > MAX_STATUS_LEN ? flat.slice(0, MAX_STATUS_LEN - 1) + "\u2026" : flat;
+}
+async function setProfileStatus(token, text, emoji) {
+  var _a, _b;
+  let res;
+  try {
+    res = await (0, import_obsidian9.requestUrl)({
+      url: ENDPOINT,
+      method: "POST",
+      contentType: "application/json; charset=utf-8",
+      headers: { Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ profile: { status_text: text, status_emoji: emoji } }),
+      // Slack reports application errors as `ok: false` inside a 200, so the
+      // body is the real result; letting a non-2xx throw would only lose the
+      // reason for it.
+      throw: false
+    });
+  } catch (e) {
+    console.error("[Filo] Slack request failed", e);
+    return { ok: false, message: "couldn't reach Slack" };
+  }
+  let body = null;
+  try {
+    body = res.json;
+  } catch (e) {
+    body = null;
+  }
+  if (!(body == null ? void 0 : body.ok)) {
+    const code = (_a = body == null ? void 0 : body.error) != null ? _a : `HTTP ${res.status}`;
+    console.error("[Filo] Slack rejected the status update", res.status, res.text);
+    return { ok: false, message: (_b = ERROR_HINTS[code]) != null ? _b : code };
+  }
+  return { ok: true };
+}
+async function postTaskToSlack(plugin, task) {
+  const token = plugin.settings.slackToken.trim();
+  if (!token) {
+    new import_obsidian9.Notice("Filo: add a Slack user token in settings first.");
+    return;
+  }
+  const text = statusTextFor(task.title);
+  const result = await setProfileStatus(token, text, plugin.settings.slackStatusEmoji);
+  if (!result.ok) {
+    new import_obsidian9.Notice(`Filo: Slack status failed \u2014 ${result.message}.`);
+    return;
+  }
+  await plugin.setSlackStatusText(text);
+  new import_obsidian9.Notice(`Filo: Slack status set to "${text}".`);
+}
+async function clearSlackStatus(plugin) {
+  const token = plugin.settings.slackToken.trim();
+  if (!token || plugin.slackStatusText === null)
+    return;
+  const owned = plugin.slackStatusText;
+  await plugin.setSlackStatusText(null);
+  const result = await setProfileStatus(token, "", "");
+  if (!result.ok) {
+    if (plugin.slackStatusText === null)
+      await plugin.setSlackStatusText(owned);
+    new import_obsidian9.Notice(`Filo: couldn't clear Slack status \u2014 ${result.message}.`);
+    return;
+  }
+  new import_obsidian9.Notice("Filo: Slack status cleared.");
+}
+
+// src/processors/renameTaskModal.ts
+var import_obsidian10 = require("obsidian");
+var RenameTaskModal = class extends import_obsidian10.Modal {
+  constructor(app, plugin, task) {
+    super(app);
+    this.plugin = plugin;
+    this.task = task;
+    this.titleVal = task.title;
+  }
+  onOpen() {
+    var _a, _b;
+    const { contentEl, titleEl } = this;
+    titleEl.setText("Rename task");
+    contentEl.empty();
+    const refs = {};
+    new import_obsidian10.Setting(contentEl).setName("Title").addText((t) => {
+      refs.title = t.inputEl;
+      t.setValue(this.titleVal);
+      t.onChange((v) => this.titleVal = v);
+      t.inputEl.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          void this.submit();
+        }
+      });
+    });
+    new import_obsidian10.Setting(contentEl).addButton(
+      (b) => b.setButtonText("Rename").setCta().onClick(() => void this.submit())
+    );
+    (_a = refs.title) == null ? void 0 : _a.focus();
+    (_b = refs.title) == null ? void 0 : _b.select();
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+  async submit() {
+    const title = this.titleVal.trim();
+    if (!title) {
+      new import_obsidian10.Notice("Filo: title required");
+      return;
+    }
+    if (title === this.task.title) {
+      this.close();
+      return;
+    }
+    try {
+      await this.plugin.store.renameTask(this.task.id, title);
+      new import_obsidian10.Notice(`Filo: renamed to "${title}"`);
+      this.close();
+    } catch (e) {
+      console.error("[Filo] rename failed", e);
+      new import_obsidian10.Notice("Filo: failed to rename task");
+    }
   }
 };
 
@@ -1982,7 +2349,7 @@ var FileTimerManager = class {
     const live = /* @__PURE__ */ new Set();
     for (const leaf of this.plugin.app.workspace.getLeavesOfType("markdown")) {
       const view = leaf.view;
-      if (!(view instanceof import_obsidian8.MarkdownView))
+      if (!(view instanceof import_obsidian11.MarkdownView))
         continue;
       live.add(view);
       const task = view.file ? byPath.get(view.file.path) : void 0;
@@ -2010,6 +2377,24 @@ var FileTimerManager = class {
   addControls(view, task) {
     const timerEl = view.addAction("play", "Filo timer", () => void this.toggleTimer(task.id));
     timerEl.addClass("filo-file-timer");
+    const slackEl = view.addAction(
+      "megaphone",
+      "Filo: post as Slack status",
+      () => void this.postSlack(task.id)
+    );
+    slackEl.addClass("filo-slack-status");
+    const renameEl = view.addAction(
+      "pencil",
+      "Filo: rename task",
+      () => void this.rename(task.id)
+    );
+    renameEl.addClass("filo-task-rename");
+    const copyEl = view.addAction(
+      "copy",
+      "Filo: copy task tree",
+      () => void this.copy(task.id)
+    );
+    copyEl.addClass("filo-task-copy");
     const parentEl = view.addAction(
       "corner-left-up",
       "Filo: go to parent task",
@@ -2028,7 +2413,16 @@ var FileTimerManager = class {
       () => void this.openCanvas(task.id)
     );
     canvasEl.addClass("filo-nav-canvas");
-    const rec = { taskId: task.id, timerEl, parentEl, childEl, canvasEl };
+    const rec = {
+      taskId: task.id,
+      timerEl,
+      slackEl,
+      renameEl,
+      copyEl,
+      parentEl,
+      childEl,
+      canvasEl
+    };
     this.records.set(view, rec);
     return rec;
   }
@@ -2038,6 +2432,9 @@ var FileTimerManager = class {
   }
   removeEls(rec) {
     rec.timerEl.remove();
+    rec.slackEl.remove();
+    rec.renameEl.remove();
+    rec.copyEl.remove();
     rec.parentEl.remove();
     rec.childEl.remove();
     rec.canvasEl.remove();
@@ -2050,6 +2447,44 @@ var FileTimerManager = class {
       await this.plugin.store.stopTimer(taskId);
     else
       await this.plugin.store.startTimer(taskId);
+  }
+  /**
+   * Announce this task on Slack as the custom status. Always available (rather
+   * than hidden when no token is set) so the missing-token notice is reachable
+   * and says what to do about it.
+   */
+  async postSlack(taskId) {
+    const task = await this.plugin.store.getTask(taskId);
+    if (!task)
+      return;
+    try {
+      await postTaskToSlack(this.plugin, task);
+    } catch (e) {
+      console.error("[Filo] Slack status update failed", e);
+      new import_obsidian11.Notice("Filo: failed to set Slack status");
+    }
+  }
+  /**
+   * Rename the task from a prompt pre-filled with its current name. Read live
+   * rather than from the captured record, so the prompt can't open on a stale
+   * title.
+   */
+  async rename(taskId) {
+    const task = await this.plugin.store.getTask(taskId);
+    if (!task)
+      return;
+    new RenameTaskModal(this.plugin.app, this.plugin, task).open();
+  }
+  /**
+   * Copy this task and its subtree. The count is resolved here so the dialog can
+   * say up front how many notes the copy will write.
+   */
+  async copy(taskId) {
+    const task = await this.plugin.store.getTask(taskId);
+    if (!task)
+      return;
+    const count = (await this.plugin.store.getSubtree(taskId)).length;
+    new CopyTaskModal(this.plugin.app, this.plugin, task, count).open();
   }
   async goToParent(taskId) {
     const task = await this.plugin.store.getTask(taskId);
@@ -2067,7 +2502,7 @@ var FileTimerManager = class {
       await this.plugin.openTaskFile(children[0]);
       return;
     }
-    const menu = new import_obsidian8.Menu();
+    const menu = new import_obsidian11.Menu();
     for (const child of children.slice().sort((a, b) => a.title.localeCompare(b.title))) {
       menu.addItem(
         (item) => item.setTitle(child.title).setIcon("circle").onClick(() => void this.plugin.openTaskFile(child))
@@ -2076,21 +2511,23 @@ var FileTimerManager = class {
     menu.showAtMouseEvent(evt);
   }
   /**
-   * Write the task's canvas (task note + its whole subtree) and open it. The
-   * canvas is refreshed on every press, so the button doubles as "sync this
-   * board with the task tree".
+   * Write the canvas for this task's whole tree and open it. The tree is
+   * resolved from its outermost ancestor, so a child opens the same board as
+   * the root rather than a partial one of its own subtree. The canvas is
+   * refreshed on every press, so the button doubles as "sync this board with
+   * the task tree".
    */
   async openCanvas(taskId) {
     try {
       await openTaskCanvas(this.plugin, taskId);
     } catch (e) {
       console.error("[Filo] failed to open task canvas", e);
-      new import_obsidian8.Notice("Filo: failed to open task canvas");
+      new import_obsidian11.Notice("Filo: failed to open task canvas");
     }
   }
   refresh(rec, task, hasParent, childCount) {
     const running = isRunning(task);
-    (0, import_obsidian8.setIcon)(rec.timerEl, running ? "square" : "play");
+    (0, import_obsidian11.setIcon)(rec.timerEl, running ? "square" : "play");
     const { ms } = computeTotal(task.sessions, this.plugin.getTimerCapMs());
     rec.timerEl.setAttribute(
       "aria-label",
@@ -2113,7 +2550,7 @@ var FileTimerManager = class {
 };
 
 // src/ui/statusBar.ts
-var import_obsidian9 = require("obsidian");
+var import_obsidian12 = require("obsidian");
 var MAX_TITLE = 28;
 var CurrentTaskStatus = class {
   constructor(plugin, el) {
@@ -2145,7 +2582,7 @@ var CurrentTaskStatus = class {
       this.sessions = [];
       this.title = "";
       this.el.toggleClass("filo-running", false);
-      (0, import_obsidian9.setIcon)(this.iconEl, "circle");
+      (0, import_obsidian12.setIcon)(this.iconEl, "circle");
       this.textEl.setText("No current task");
       this.el.setAttribute("aria-label", "Filo: no current task");
       return;
@@ -2154,7 +2591,7 @@ var CurrentTaskStatus = class {
     this.title = task.title;
     this.sessions = task.sessions;
     this.running = task.sessions.some((s) => s.stop === null);
-    (0, import_obsidian9.setIcon)(this.iconEl, this.running ? "clock" : "circle");
+    (0, import_obsidian12.setIcon)(this.iconEl, this.running ? "clock" : "circle");
     this.el.toggleClass("filo-running", this.running);
     this.el.setAttribute("aria-label", `Filo: jump to "${task.title}"`);
     this.renderText();
@@ -2176,20 +2613,17 @@ var CurrentTaskStatus = class {
 };
 
 // src/ui/taskSuggest.ts
-var import_obsidian11 = require("obsidian");
+var import_obsidian14 = require("obsidian");
 
 // src/store/mtime.ts
-var import_obsidian10 = require("obsidian");
+var import_obsidian13 = require("obsidian");
 function taskMtime(app, task) {
   const f = app.vault.getAbstractFileByPath(task.path);
-  return f instanceof import_obsidian10.TFile ? f.stat.mtime : 0;
+  return f instanceof import_obsidian13.TFile ? f.stat.mtime : 0;
 }
 function byRecentlyModified(app, tasks) {
   return tasks.map((task) => ({ task, mtime: taskMtime(app, task) })).sort((a, b) => b.mtime - a.mtime).map((x) => x.task);
 }
-
-// src/ui/taskSuggest.ts
-var MAX_QUERY_LEN = 40;
 function relativeTime(ms) {
   if (!ms)
     return "";
@@ -2207,10 +2641,13 @@ function relativeTime(ms) {
     return `${days}d ago`;
   return new Date(ms).toISOString().slice(0, 10);
 }
+
+// src/ui/taskSuggest.ts
+var MAX_QUERY_LEN = 40;
 function safeAlias(title) {
   return title.replace(/[|\[\]]/g, "").trim() || "task";
 }
-var TaskLinkSuggest = class extends import_obsidian11.EditorSuggest {
+var TaskLinkSuggest = class extends import_obsidian14.EditorSuggest {
   constructor(plugin) {
     super(plugin.app);
     this.plugin = plugin;
@@ -2245,7 +2682,7 @@ var TaskLinkSuggest = class extends import_obsidian11.EditorSuggest {
   async getSuggestions(context) {
     const tasks = await this.plugin.store.listTasks();
     const query = context.query.trim();
-    const match = query ? (0, import_obsidian11.prepareFuzzySearch)(query) : null;
+    const match = query ? (0, import_obsidian14.prepareFuzzySearch)(query) : null;
     const out = [];
     for (const task of tasks) {
       if (this.plugin.settings.taskLinkHideDone && task.status === "done")
@@ -2294,15 +2731,96 @@ var TaskLinkSuggest = class extends import_obsidian11.EditorSuggest {
   linkFor(task, sourcePath) {
     const alias = safeAlias(task.title);
     const f = this.app.vault.getAbstractFileByPath(task.path);
-    if (f instanceof import_obsidian11.TFile) {
+    if (f instanceof import_obsidian14.TFile) {
       return this.app.fileManager.generateMarkdownLink(f, sourcePath, void 0, alias);
     }
     return `[[${task.path.replace(/\.md$/, "")}|${alias}]]`;
   }
 };
 
+// src/ui/taskSearchModal.ts
+var import_obsidian15 = require("obsidian");
+var MAX_RESULTS = 50;
+var TaskSearchModal = class extends import_obsidian15.SuggestModal {
+  constructor(app, plugin, tasks) {
+    super(app);
+    this.plugin = plugin;
+    this.titleById = new Map(tasks.map((t) => [t.id, t.title]));
+    this.hits = tasks.map((task) => ({
+      task,
+      matches: null,
+      viaTitle: false,
+      score: 0,
+      mtime: taskMtime(app, task)
+    }));
+    this.limit = MAX_RESULTS;
+    this.setPlaceholder("Search tasks by title or tag\u2026");
+    this.emptyStateText = "No matching tasks";
+    this.setInstructions([
+      { command: "\u2191\u2193", purpose: "navigate" },
+      { command: "\u21B5", purpose: "open task" },
+      { command: "esc", purpose: "dismiss" }
+    ]);
+  }
+  getSuggestions(query) {
+    const q = query.trim();
+    if (!q) {
+      return this.hits.slice().sort((a, b) => b.mtime - a.mtime);
+    }
+    const match = (0, import_obsidian15.prepareFuzzySearch)(q);
+    const out = [];
+    for (const hit of this.hits) {
+      const onTitle = match(hit.task.title);
+      if (onTitle) {
+        out.push({ ...hit, matches: onTitle.matches, viaTitle: true, score: onTitle.score });
+        continue;
+      }
+      let best = null;
+      for (const tag of hit.task.tags) {
+        const r = match(tag);
+        if (r && (best === null || r.score > best))
+          best = r.score;
+      }
+      if (best !== null)
+        out.push({ ...hit, matches: null, viaTitle: false, score: best });
+    }
+    out.sort(
+      (a, b) => Number(b.viaTitle) - Number(a.viaTitle) || b.score - a.score || b.mtime - a.mtime
+    );
+    return out;
+  }
+  renderSuggestion(hit, el) {
+    const { task } = hit;
+    el.addClass("filo-suggest-item");
+    const main = el.createDiv({ cls: "filo-suggest-main" });
+    main.createSpan({
+      cls: `filo-suggest-status filo-suggest-status-${task.status}`,
+      text: STATUS_ICON[task.status]
+    });
+    const titleEl = main.createSpan({ cls: "filo-suggest-title" });
+    if (hit.matches)
+      (0, import_obsidian15.renderMatches)(titleEl, task.title, hit.matches);
+    else
+      titleEl.setText(task.title);
+    const meta = el.createDiv({ cls: "filo-suggest-meta" });
+    const parent = task.parent ? this.titleById.get(task.parent) : void 0;
+    if (parent)
+      meta.createSpan({ cls: "filo-suggest-parent", text: `in ${parent}` });
+    if (task.due)
+      meta.createSpan({ cls: "filo-suggest-due", text: `due ${task.due}` });
+    for (const tag of task.tags)
+      meta.createSpan({ cls: "filo-tag", text: `#${tag}` });
+    const rel = relativeTime(hit.mtime);
+    if (rel)
+      meta.createSpan({ cls: "filo-suggest-mtime", text: rel });
+  }
+  onChooseSuggestion(hit) {
+    void this.plugin.openTaskFile(hit.task);
+  }
+};
+
 // src/ui/parentBanner.ts
-var import_obsidian12 = require("obsidian");
+var import_obsidian16 = require("obsidian");
 var STATUS_MENU_ICON = {
   undone: "circle",
   "in-progress": "circle-dot",
@@ -2321,7 +2839,7 @@ var STATUS_LABEL = {
 var STATUS_CLASSES = Object.keys(STATUS_LABEL).map(
   (s) => `filo-banner-status-${s}`
 );
-var ParentPickerModal = class extends import_obsidian12.FuzzySuggestModal {
+var ParentPickerModal = class extends import_obsidian16.FuzzySuggestModal {
   constructor(app, choices, onChoose) {
     super(app);
     this.choices = choices;
@@ -2364,7 +2882,7 @@ var ParentBannerManager = class {
     const live = /* @__PURE__ */ new Set();
     for (const leaf of this.plugin.app.workspace.getLeavesOfType("markdown")) {
       const view = leaf.view;
-      if (!(view instanceof import_obsidian12.MarkdownView))
+      if (!(view instanceof import_obsidian16.MarkdownView))
         continue;
       live.add(view);
       const task = view.file ? byPath.get(view.file.path) : void 0;
@@ -2399,12 +2917,12 @@ var ParentBannerManager = class {
     const valueEl = el.createEl("button", { cls: "filo-parent-value" });
     valueEl.addEventListener("click", () => void this.openPicker(task.id));
     const openEl = el.createEl("button", { cls: "filo-parent-open" });
-    (0, import_obsidian12.setIcon)(openEl, "corner-left-up");
+    (0, import_obsidian16.setIcon)(openEl, "corner-left-up");
     openEl.setAttribute("aria-label", "Open parent task");
     openEl.addEventListener("click", () => void this.goToParent(task.id));
     const childrenEl = el.createEl("button", { cls: "filo-parent-children" });
     const childIconEl = childrenEl.createSpan({ cls: "filo-parent-children-icon" });
-    (0, import_obsidian12.setIcon)(childIconEl, "list-tree");
+    (0, import_obsidian16.setIcon)(childIconEl, "list-tree");
     const childCountEl = childrenEl.createSpan({ cls: "filo-parent-children-count" });
     childrenEl.addEventListener("click", (evt) => void this.openChildMenu(task.id, evt));
     view.contentEl.prepend(el);
@@ -2431,7 +2949,7 @@ var ParentBannerManager = class {
     rec.statusEl.removeClass(...STATUS_CLASSES);
     rec.statusEl.addClass(`filo-banner-status-${task.status}`);
     rec.statusIconEl.empty();
-    (0, import_obsidian12.setIcon)(rec.statusIconEl, STATUS_MENU_ICON[task.status]);
+    (0, import_obsidian16.setIcon)(rec.statusIconEl, STATUS_MENU_ICON[task.status]);
     rec.statusTextEl.setText(STATUS_LABEL[task.status]);
     rec.statusEl.setAttribute(
       "aria-label",
@@ -2473,7 +2991,7 @@ var ParentBannerManager = class {
       await this.plugin.store.setStatus(taskId, NEXT_STATUS2[task.status]);
     } catch (e) {
       console.error("[Filo] failed to set status", e);
-      new import_obsidian12.Notice("Filo: failed to set status");
+      new import_obsidian16.Notice("Filo: failed to set status");
     }
   }
   /**
@@ -2484,7 +3002,7 @@ var ParentBannerManager = class {
   async openChildMenu(taskId, evt) {
     const children = await this.plugin.store.getChildren(taskId);
     if (!children.length) {
-      new import_obsidian12.Notice("Filo: no subtasks.");
+      new import_obsidian16.Notice("Filo: no subtasks.");
       return;
     }
     const order = {
@@ -2493,7 +3011,7 @@ var ParentBannerManager = class {
       done: 2
     };
     const sorted = children.slice().sort((a, b) => order[a.status] - order[b.status] || a.title.localeCompare(b.title));
-    const menu = new import_obsidian12.Menu();
+    const menu = new import_obsidian16.Menu();
     for (const child of sorted) {
       menu.addItem(
         (item) => item.setTitle(child.title).setIcon(STATUS_MENU_ICON[child.status]).onClick(() => void this.plugin.openTaskFile(child))
@@ -2533,7 +3051,7 @@ var ParentBannerManager = class {
       choices.push({ task: t, label: t.title });
     }
     if (!choices.length) {
-      new import_obsidian12.Notice("Filo: no other tasks available as a parent.");
+      new import_obsidian16.Notice("Filo: no other tasks available as a parent.");
       return;
     }
     new ParentPickerModal(app, choices, (choice) => {
@@ -2544,12 +3062,12 @@ var ParentBannerManager = class {
     var _a, _b;
     try {
       await this.plugin.store.updateTask(taskId, { parent: (_b = (_a = choice.task) == null ? void 0 : _a.id) != null ? _b : null });
-      new import_obsidian12.Notice(
+      new import_obsidian16.Notice(
         choice.task ? `Filo: parent set to "${choice.task.title}"` : "Filo: parent cleared"
       );
     } catch (e) {
       console.error("[Filo] failed to set parent", e);
-      new import_obsidian12.Notice("Filo: failed to set parent");
+      new import_obsidian16.Notice("Filo: failed to set parent");
     }
   }
   /** Remove all banners (called on plugin unload and when the setting is off). */
@@ -2561,10 +3079,10 @@ var ParentBannerManager = class {
 };
 
 // src/ui/canvasActions.ts
-var import_obsidian14 = require("obsidian");
+var import_obsidian18 = require("obsidian");
 
 // src/canvas/canvasDigest.ts
-var import_obsidian13 = require("obsidian");
+var import_obsidian17 = require("obsidian");
 function sourceFor(plugin, node) {
   var _a, _b;
   if (node.type === "text") {
@@ -2573,7 +3091,7 @@ function sourceFor(plugin, node) {
   }
   if (node.type === "file") {
     const f = plugin.app.vault.getAbstractFileByPath(String((_b = node.file) != null ? _b : ""));
-    if (!(f instanceof import_obsidian13.TFile) || f.extension !== "md")
+    if (!(f instanceof import_obsidian17.TFile) || f.extension !== "md")
       return null;
     return { title: f.basename, body: "", file: f };
   }
@@ -2641,7 +3159,7 @@ async function digestCanvas(plugin, file) {
   await flushCanvasView(plugin, file);
   const canvas = await readCanvas(app, file);
   if (!canvas.nodes.length) {
-    new import_obsidian13.Notice("Filo: this canvas is empty.");
+    new import_obsidian17.Notice("Filo: this canvas is empty.");
     return;
   }
   const tasks = await plugin.store.listTasks();
@@ -2659,7 +3177,7 @@ async function digestCanvas(plugin, file) {
   }
   const rootTaskId = findRootTaskId(Array.from(new Set(taskIdOf.values())), byId);
   if (!rootTaskId) {
-    new import_obsidian13.Notice("Filo: no Filo task on this canvas \u2014 open one from a task note first.");
+    new import_obsidian17.Notice("Filo: no Filo task on this canvas \u2014 open one from a task note first.");
     return;
   }
   const nodeById = new Map(canvas.nodes.map((n) => [n.id, n]));
@@ -2735,7 +3253,7 @@ async function digestCanvas(plugin, file) {
     reparented++;
   }
   if (!createdCount && !adoptedCount && !reparented) {
-    new import_obsidian13.Notice(
+    new import_obsidian17.Notice(
       refused ? "Filo: nothing to digest (an edge would have made a task its own ancestor)." : "Filo: nothing new on this canvas."
     );
     await rebuild(plugin, rootTaskId, file);
@@ -2752,7 +3270,7 @@ async function digestCanvas(plugin, file) {
     parts.push(`${reparented} re-parented`);
   if (refused)
     parts.push(`${refused} skipped (would loop)`);
-  new import_obsidian13.Notice(`Filo: digested canvas \u2014 ${parts.join(", ")}.`);
+  new import_obsidian17.Notice(`Filo: digested canvas \u2014 ${parts.join(", ")}.`);
 }
 async function writeDigestedCanvas(plugin, file, nodes, edges, taskIdOf) {
   const tasks = await plugin.store.listTasks();
@@ -2804,11 +3322,11 @@ var CanvasActionManager = class {
     for (const leaf of this.plugin.app.workspace.getLeavesOfType("canvas")) {
       const view = leaf.view;
       const file = view.file;
-      if (!(view instanceof import_obsidian14.ItemView) || !(file instanceof import_obsidian14.TFile))
+      if (!(view instanceof import_obsidian18.ItemView) || !(file instanceof import_obsidian18.TFile))
         continue;
       live.add(leaf);
       let rec = this.records.get(leaf);
-      if (rec && rec.path !== file.path) {
+      if (rec && (rec.path !== file.path || rec.view !== view)) {
         rec.el.remove();
         this.records.delete(leaf);
         rec = void 0;
@@ -2820,7 +3338,7 @@ var CanvasActionManager = class {
           () => void this.digest(file)
         );
         el.addClass("filo-canvas-digest");
-        rec = { path: file.path, el };
+        rec = { path: file.path, view, el };
         this.records.set(leaf, rec);
       }
       rec.el.style.display = await this.isFiloCanvas(file, taskIds) ? "" : "none";
@@ -2844,8 +3362,9 @@ var CanvasActionManager = class {
       await digestCanvas(this.plugin, file);
     } catch (e) {
       console.error("[Filo] canvas digest failed", e);
-      new import_obsidian14.Notice("Filo: failed to digest canvas");
+      new import_obsidian18.Notice("Filo: failed to digest canvas");
     }
+    await this.update();
   }
   /** Remove all buttons (called on plugin unload). */
   destroy() {
@@ -2857,11 +3376,13 @@ var CanvasActionManager = class {
 };
 
 // src/main.ts
-var FiloPlugin = class extends import_obsidian15.Plugin {
+var FiloPlugin = class extends import_obsidian19.Plugin {
   constructor() {
     super(...arguments);
     this.activeTaskId = null;
     this.lastTaskId = null;
+    /** See `FiloData.slackStatusText`. Read by the Slack module. */
+    this.slackStatusText = null;
   }
   async onload() {
     await this.loadFiloData();
@@ -2907,6 +3428,22 @@ var FiloPlugin = class extends import_obsidian15.Plugin {
           return false;
         if (!checking)
           void this.openCreateTask();
+        return true;
+      }
+    });
+    this.addCommand({
+      id: "search-tasks",
+      name: "Search tasks",
+      callback: () => void this.openTaskSearch()
+    });
+    this.addCommand({
+      id: "copy-task-tree",
+      name: "Copy task tree",
+      checkCallback: (checking) => {
+        if (!this.activeTaskFilePath())
+          return false;
+        if (!checking)
+          void this.openCopyTask();
         return true;
       }
     });
@@ -2960,14 +3497,14 @@ var FiloPlugin = class extends import_obsidian15.Plugin {
     try {
       const count = await this.store.processRecurring();
       if (announce) {
-        new import_obsidian15.Notice(
+        new import_obsidian19.Notice(
           count > 0 ? `Filo: reset ${count} recurring task${count === 1 ? "" : "s"}` : "Filo: no recurring tasks due"
         );
       }
     } catch (e) {
       console.error("[Filo] processRecurring failed", e);
       if (announce)
-        new import_obsidian15.Notice("Filo: failed to process recurring tasks");
+        new import_obsidian19.Notice("Filo: failed to process recurring tasks");
     }
   }
   onunload() {
@@ -2988,8 +3525,8 @@ var FiloPlugin = class extends import_obsidian15.Plugin {
   /** Track the last opened task file (for the status-bar fallback) and refresh UI. */
   async onFileOpen(file) {
     this.refreshFileUI();
-    if (file instanceof import_obsidian15.TFile && file.extension === "md") {
-      const folder = (0, import_obsidian15.normalizePath)(this.settings.tasksFolder || "tasks");
+    if (file instanceof import_obsidian19.TFile && file.extension === "md") {
+      const folder = (0, import_obsidian19.normalizePath)(this.settings.tasksFolder || "tasks");
       if (file.path.startsWith(folder + "/")) {
         const task = (await this.store.listTasks()).find((t) => t.path === file.path);
         if (task && task.id !== this.lastTaskId) {
@@ -3025,16 +3562,36 @@ var FiloPlugin = class extends import_obsidian15.Plugin {
   /** Open a task's backing file in the active leaf. */
   async openTaskFile(task) {
     const f = this.app.vault.getAbstractFileByPath(task.path);
-    if (f instanceof import_obsidian15.TFile)
+    if (f instanceof import_obsidian19.TFile)
       await this.app.workspace.getLeaf(false).openFile(f);
   }
   /** Active file's path if it's a markdown file inside the tasks folder, else null. */
   activeTaskFilePath() {
     const f = this.app.workspace.getActiveFile();
-    if (!(f instanceof import_obsidian15.TFile) || f.extension !== "md")
+    if (!(f instanceof import_obsidian19.TFile) || f.extension !== "md")
       return null;
-    const folder = (0, import_obsidian15.normalizePath)(this.settings.tasksFolder || "tasks");
+    const folder = (0, import_obsidian19.normalizePath)(this.settings.tasksFolder || "tasks");
     return f.path.startsWith(folder + "/") ? f.path : null;
+  }
+  /** Open the task-scoped search dialog. */
+  async openTaskSearch() {
+    const tasks = await this.store.listTasks();
+    if (!tasks.length) {
+      new import_obsidian19.Notice("Filo: no tasks to search.");
+      return;
+    }
+    new TaskSearchModal(this.app, this, tasks).open();
+  }
+  /** Open the copy dialog for the task whose file is active. */
+  async openCopyTask() {
+    const path = this.activeTaskFilePath();
+    if (!path)
+      return;
+    const task = (await this.store.listTasks()).find((t) => t.path === path);
+    if (!task)
+      return;
+    const count = (await this.store.getSubtree(task.id)).length;
+    new CopyTaskModal(this.app, this, task, count).open();
   }
   /** Open the create-task modal, defaulting the parent to the active task (if any). */
   async openCreateTask() {
@@ -3049,34 +3606,34 @@ var FiloPlugin = class extends import_obsidian15.Plugin {
   }
   /** The active view's file when it's a canvas, else null. */
   activeCanvasFile() {
-    const view = this.app.workspace.getActiveViewOfType(import_obsidian15.ItemView);
+    const view = this.app.workspace.getActiveViewOfType(import_obsidian19.ItemView);
     const file = this.app.workspace.getActiveFile();
     if (!view || view.getViewType() !== "canvas")
       return null;
-    return file instanceof import_obsidian15.TFile && file.extension === "canvas" ? file : null;
+    return file instanceof import_obsidian19.TFile && file.extension === "canvas" ? file : null;
   }
   async runDigest(file) {
     try {
       await digestCanvas(this, file);
     } catch (e) {
       console.error("[Filo] canvas digest failed", e);
-      new import_obsidian15.Notice("Filo: failed to digest canvas");
+      new import_obsidian19.Notice("Filo: failed to digest canvas");
     }
   }
   async runCanvasImport() {
     var _a, _b;
     const active = this.app.workspace.getActiveFile();
     const tasks = await this.store.listTasks();
-    let rootId = null;
-    if (active instanceof import_obsidian15.TFile) {
-      rootId = (_b = (_a = tasks.find((t) => t.path === active.path)) == null ? void 0 : _a.id) != null ? _b : null;
+    let taskId = null;
+    if (active instanceof import_obsidian19.TFile) {
+      taskId = (_b = (_a = tasks.find((t) => t.path === active.path)) == null ? void 0 : _a.id) != null ? _b : null;
     }
-    if (rootId) {
-      await openTaskCanvas(this, rootId);
+    if (taskId) {
+      await openTaskCanvas(this, taskId);
       return;
     }
     if (!tasks.length) {
-      new import_obsidian15.Notice("Filo: no tasks to import.");
+      new import_obsidian19.Notice("Filo: no tasks to import.");
       return;
     }
     new TaskPickerModal(this.app, tasks, (t) => void openTaskCanvas(this, t.id)).open();
@@ -3094,20 +3651,29 @@ var FiloPlugin = class extends import_obsidian15.Plugin {
   async setActiveTaskId(id) {
     this.activeTaskId = id;
     await this.persist();
+    if (id === null)
+      void clearSlackStatus(this);
+  }
+  /** Record (and persist) what Filo last pushed to Slack; null = nothing of ours. */
+  async setSlackStatusText(text) {
+    this.slackStatusText = text;
+    await this.persist();
   }
   // --- persistence ---------------------------------------------------------
   async loadFiloData() {
-    var _a, _b, _c;
+    var _a, _b, _c, _d;
     const data = await this.loadData();
     this.settings = Object.assign({}, DEFAULT_SETTINGS, (_a = data == null ? void 0 : data.settings) != null ? _a : {});
     this.activeTaskId = (_b = data == null ? void 0 : data.activeTaskId) != null ? _b : null;
     this.lastTaskId = (_c = data == null ? void 0 : data.lastTaskId) != null ? _c : null;
+    this.slackStatusText = (_d = data == null ? void 0 : data.slackStatusText) != null ? _d : null;
   }
   async persist() {
     const data = {
       settings: this.settings,
       activeTaskId: this.activeTaskId,
-      lastTaskId: this.lastTaskId
+      lastTaskId: this.lastTaskId,
+      slackStatusText: this.slackStatusText
     };
     await this.saveData(data);
   }

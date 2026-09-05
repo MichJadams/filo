@@ -26,6 +26,14 @@ export interface FiloSettings {
   taskLinkHideDone: boolean;
   /** Shows a click-to-change parent banner (by title) at the top of task notes. */
   parentBanner: boolean;
+  /**
+   * Slack **user** token (`xoxp-`) with the `users.profile:write` scope, from a
+   * Slack app installed to your workspace. A bot token will not work: Slack
+   * refuses to let one set a human's status. Empty disables the status button.
+   */
+  slackToken: string;
+  /** Emoji shown beside the Slack status, in `:name:` form. */
+  slackStatusEmoji: string;
 }
 
 export const DEFAULT_SETTINGS: FiloSettings = {
@@ -39,6 +47,8 @@ export const DEFAULT_SETTINGS: FiloSettings = {
   taskLinkMaxResults: 20,
   taskLinkHideDone: false,
   parentBanner: true,
+  slackToken: "",
+  slackStatusEmoji: ":mega:",
 };
 
 export class FiloSettingTab extends PluginSettingTab {
@@ -188,6 +198,36 @@ export class FiloSettingTab extends PluginSettingTab {
           this.plugin.settings.parentBanner = v;
           await this.plugin.saveSettings();
         })
+      );
+
+    new Setting(containerEl).setName("Slack").setHeading();
+
+    new Setting(containerEl)
+      .setName("User token")
+      .setDesc(
+        "Slack user token (xoxp-) with the users.profile:write scope. Create an app at api.slack.com/apps, add that User Token Scope, and install it to your workspace. A bot token will not work — Slack only lets a user token set a human's status. Stored in plain text in this plugin's data.json."
+      )
+      .addText((t) => {
+        t.inputEl.type = "password";
+        t.setPlaceholder("xoxp-…")
+          .setValue(this.plugin.settings.slackToken)
+          .onChange(async (v) => {
+            this.plugin.settings.slackToken = v.trim();
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Status emoji")
+      .setDesc("Emoji posted alongside the task title, in :name: form.")
+      .addText((t) =>
+        t
+          .setPlaceholder(":mega:")
+          .setValue(this.plugin.settings.slackStatusEmoji)
+          .onChange(async (v) => {
+            this.plugin.settings.slackStatusEmoji = v.trim();
+            await this.plugin.saveSettings();
+          })
       );
   }
 }

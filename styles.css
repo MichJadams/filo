@@ -373,6 +373,13 @@
   font-size: 0.75em;
   color: var(--text-muted);
 }
+.filo-suggest-parent {
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 40%;
+}
 .filo-suggest-mtime {
   margin-left: auto;
   font-variant-numeric: tabular-nums;

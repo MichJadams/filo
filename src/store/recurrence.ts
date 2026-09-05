@@ -170,6 +170,42 @@ export function logSectionTemplate(): string {
  * Creates the whole section if no marker is present yet, so it's safe to call on
  * a task that was never set up with a log.
  */
+/**
+ * Return a copy of `content` with every logged period removed, keeping the
+ * section and its table header.
+ *
+ * Used when copying a task: the log records what happened to the *original*, so
+ * the copy has to start with an empty one. Content with no log is returned
+ * untouched.
+ */
+export function clearLogEntries(content: string): string {
+  const lines = content.split("\n");
+  const markerIdx = lines.findIndex((l) => l.trim() === LOG_MARKER);
+  if (markerIdx === -1) return content;
+
+  // Same walk as appendLogEntry: the contiguous table region after the marker.
+  let first = -1;
+  let last = -1;
+  for (let i = markerIdx + 1; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (t === "") {
+      if (last !== -1) break;
+      continue;
+    }
+    if (t.startsWith("|")) {
+      if (first === -1) first = i;
+      last = i;
+      continue;
+    }
+    break;
+  }
+
+  // Keep the two header rows (the column names and the `| --- |` rule).
+  if (first === -1 || last < first + 2) return content;
+  lines.splice(first + 2, last - (first + 1));
+  return lines.join("\n");
+}
+
 export function appendLogEntry(
   content: string,
   date: string,

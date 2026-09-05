@@ -8,7 +8,13 @@ import {
 } from "../types";
 import { generateTaskId } from "./id";
 import { computeTotal, parseSessions, writeSessions } from "./timeBlock";
-import { appendLogEntry, lastFireBetween, localDate, logSectionTemplate } from "./recurrence";
+import {
+  appendLogEntry,
+  clearLogEntries,
+  lastFireBetween,
+  localDate,
+  logSectionTemplate,
+} from "./recurrence";
 
 /**
  * Bridge to plugin-level state that the store needs but should not own:
@@ -33,6 +39,42 @@ const STATUSES: TaskStatus[] = ["undone", "in-progress", "done"];
 function headingLine(title: string): string {
   const flat = (title ?? "").replace(/\s+/g, " ").trim();
   return flat || "Untitled";
+}
+
+/**
+ * Rewrite the note's H1 to `title`, inserting one just below the frontmatter if
+ * the note hasn't got one (an adopted note, say — `adoptFile` doesn't add one).
+ *
+ * Only the first level-1 heading **outside a fenced code block** counts: a `# `
+ * inside a shell snippet is a comment, not the task's name. `##` and deeper are
+ * left alone — they're the note's own structure.
+ */
+function writeHeading(content: string, title: string): string {
+  const heading = `# ${headingLine(title)}`;
+  const lines = content.split("\n");
+
+  // Step over the frontmatter so its `---` delimiters aren't read as content.
+  let i = 0;
+  if (lines[0]?.trim() === "---") {
+    const end = lines.findIndex((l, n) => n > 0 && l.trim() === "---");
+    if (end > 0) i = end + 1;
+  }
+
+  const bodyStart = i;
+  let inFence = false;
+  for (; i < lines.length; i++) {
+    if (/^\s*(```|~~~)/.test(lines[i])) {
+      inFence = !inFence;
+      continue;
+    }
+    if (!inFence && /^#\s+/.test(lines[i])) {
+      lines[i] = heading;
+      return lines.join("\n");
+    }
+  }
+
+  lines.splice(bodyStart, 0, "", heading);
+  return lines.join("\n");
 }
 
 export class TaskStore {
@@ -354,6 +396,102 @@ export class TaskStore {
     this.invalidate();
   }
 
+  /**
+   * Rename a task, keeping in sync the two places its name lives: the `title`
+   * frontmatter property and the H1 heading in the body.
+   *
+   * `updateTask({ title })` only rewrites the property, which is how a note ends
+   * up with a heading that disagrees with its title — the heading is what you
+   * read on the note and on its canvas card, so the two drifting apart is worse
+   * than either being wrong.
+   *
+   * Body first, then YAML: two writers on one file race otherwise (the same
+   * ordering `adoptFile` uses, for the same reason).
+   */
+  async renameTask(id: string, title: string): Promise<void> {
+    const file = await this.fileForId(id);
+    if (!file) throw new Error(`[Filo] task not found: ${id}`);
+
+    const next = title.trim();
+    if (!next) throw new Error("[Filo] a task needs a title");
+
+    await this.app.vault.process(file, (content) => writeHeading(content, next));
+    await this.app.fileManager.processFrontMatter(file, (fm) => {
+      fm.title = next;
+    });
+    this.invalidate();
+  }
+
+  /**
+   * Duplicate the subtree rooted at `rootId` as a fresh, undone tree, leaving
+   * the originals completely untouched. Returns the new root.
+   *
+   * Each copy keeps its note **verbatim** — body, tags, priority, due date,
+   * recurrence settings — and resets only what belonged to the original run: a
+   * new id, `undone` status, an empty timer block, an empty recurrence log, and
+   * `created` set to now. Copying the file and clearing those in place beats
+   * reassembling a note from parsed parts, which would quietly drop anything
+   * the parser doesn't model.
+   *
+   * The copies are re-parented onto each other, so the structure is mirrored
+   * within the copy rather than pointing back at the originals. The new root is
+   * detached to top level, making the copy its own tree with its own canvas.
+   *
+   * `newRootTitle` renames just the copied root; descendants keep their titles.
+   */
+  async copySubtree(rootId: string, newRootTitle?: string): Promise<Task> {
+    const nodes = await this.getSubtree(rootId);
+    if (!nodes.length) throw new Error(`[Filo] task not found: ${rootId}`);
+
+    const folder = this.folder();
+    await this.ensureFolder(folder);
+
+    // Resolve every source file up front: a missing one has to fail before
+    // anything is written, rather than leaving half a tree behind.
+    const sources = new Map<string, TFile>();
+    for (const n of nodes) {
+      const f = this.app.vault.getAbstractFileByPath(n.task.path);
+      if (!(f instanceof TFile)) {
+        throw new Error(`[Filo] missing task file: ${n.task.path}`);
+      }
+      sources.set(n.task.id, f);
+    }
+
+    // Map every old id to its new one up front, so a child can point at its
+    // copied parent whatever order the notes get written in.
+    const idMap = new Map<string, string>();
+    for (const n of nodes) idMap.set(n.task.id, generateTaskId());
+
+    const created = new Date().toISOString();
+
+    for (const n of nodes) {
+      const newId = idMap.get(n.task.id) as string;
+
+      // Body edits happen before the file exists, so creating it and rewriting
+      // its frontmatter are the only two writes and can never race.
+      let content = writeSessions(await this.app.vault.read(sources.get(n.task.id) as TFile), []);
+      content = clearLogEntries(content);
+      const renameRoot = n.task.id === rootId && !!newRootTitle;
+      if (renameRoot) content = writeHeading(content, newRootTitle as string);
+
+      const file = await this.app.vault.create(`${folder}/${newId}.md`, content);
+      await this.app.fileManager.processFrontMatter(file, (fm) => {
+        fm.id = newId;
+        fm.status = "undone";
+        // The root detaches; every descendant follows its copied parent.
+        fm.parent = n.task.id === rootId ? null : idMap.get(n.task.parent as string) ?? null;
+        fm.created = created;
+        fm.lastReset = fm.recurring ? created : null;
+        if (renameRoot) fm.title = newRootTitle;
+      });
+    }
+
+    this.invalidate();
+    const copy = await this.getTask(idMap.get(rootId) as string);
+    if (!copy) throw new Error("[Filo] copy failed: the new root was not found");
+    return copy;
+  }
+
   async setStatus(id: string, status: TaskStatus): Promise<void> {
     await this.updateTask(id, { status });
   }
@@ -413,6 +551,29 @@ export class TaskStore {
 
   async getChildren(id: string): Promise<Task[]> {
     return (await this.listTasks()).filter((t) => t.parent === id);
+  }
+
+  /**
+   * Walk up `parent` from `id` to the top of its tree, returning the outermost
+   * ancestor (or `id` itself when it has no parent). A dangling `parent` — one
+   * pointing at a task that no longer exists — stops the climb where it is, and
+   * a `seen` set guards against a parent cycle looping forever.
+   *
+   * Returns null when `id` isn't a task at all.
+   */
+  async getRoot(id: string): Promise<Task | null> {
+    const all = await this.listTasks();
+    const byId = new Map(all.map((t) => [t.id, t]));
+
+    let task = byId.get(id) ?? null;
+    const seen = new Set<string>();
+    while (task?.parent && !seen.has(task.id)) {
+      seen.add(task.id);
+      const parent = byId.get(task.parent);
+      if (!parent) break;
+      task = parent;
+    }
+    return task;
   }
 
   /**

@@ -164,30 +164,6 @@ function sizeFor(prev: CanvasNode | undefined): { width: number; height: number 
 
 // --- Canvas file naming ----------------------------------------------------
 
-/**
- * Characters Obsidian refuses in a file name (plus the ones its link syntax
- * chokes on). Replaced with spaces rather than dropped so words stay separated.
- */
-const ILLEGAL_NAME_CHARS = /[\\/:*?"<>|#^[\]]/g;
-
-/** Longest generated file name, before the extension. */
-const MAX_NAME_LEN = 80;
-
-/**
- * Turn a task title into a canvas file name. Falls back to `fallback` (the task
- * id) when the title has nothing usable left — e.g. a title of only slashes.
- */
-export function canvasFileName(title: string, fallback: string): string {
-  const cleaned = title
-    .replace(ILLEGAL_NAME_CHARS, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, MAX_NAME_LEN)
-    // Leading/trailing dots make for hidden or malformed file names.
-    .replace(/^\.+|[.\s]+$/g, "");
-  return cleaned || fallback;
-}
-
 /** Prefix of every edge id Filo generates, i.e. the ones it owns and rebuilds. */
 export const TASK_EDGE_PREFIX = "e-t-";
 
@@ -224,60 +200,38 @@ async function isCanvasRootedAt(app: App, file: TFile, rootId: string): Promise<
 }
 
 /**
- * Where the canvas for `root` lives, named after the task's **title**.
+ * Where the canvas for `root` lives: `<canvasFolder>/<rootId>.canvas`.
  *
- * A task's title can change and two tasks can share one, so the path is
- * resolved rather than computed:
- *  - an existing canvas rooted at this task wins, wherever it sits — including
- *    the legacy `<id>.canvas` name — and is renamed to follow the title;
- *  - if the title name is taken by an unrelated canvas, the id is appended
- *    instead of merging task nodes into someone else's board.
+ * Keyed on the **id**, the one thing about a task that never changes. That
+ * makes the path a pure function of the tree's root: every task in a tree
+ * resolves to the same board with no lookup, renaming a task can't move,
+ * orphan or duplicate it, and two tasks sharing a title can't collide.
+ *
+ * The scan below is a one-time migration off the old title-based naming: a
+ * canvas rooted at this task, wherever it sits in the folder, is moved onto the
+ * id path so its hand-placed cards survive. Once moved, the direct hit above
+ * wins and the scan never runs for that tree again.
  */
 async function resolveCanvasPath(plugin: FiloPlugin, root: Task): Promise<string> {
   const app = plugin.app;
   const folder = normalizePath(plugin.settings.canvasFolder || "");
-  const join = (name: string) => (folder ? `${folder}/${name}.canvas` : `${name}.canvas`);
+  const idPath = folder ? `${folder}/${root.id}.canvas` : `${root.id}.canvas`;
 
-  const name = canvasFileName(root.title, root.id);
-  const titlePath = join(name);
+  if (app.vault.getAbstractFileByPath(idPath) instanceof TFile) return idPath;
 
-  const atTitle = app.vault.getAbstractFileByPath(titlePath);
-  if (atTitle instanceof TFile && (await isCanvasRootedAt(app, atTitle, root.id))) {
-    return titlePath;
-  }
-
-  // Find a canvas already generated for this task: the pre-title `<id>.canvas`
-  // name first (cheap), then any canvas in the output folder (covers a task
-  // that has since been renamed).
-  let existing: TFile | null = null;
-  const legacy = app.vault.getAbstractFileByPath(join(root.id));
-  if (legacy instanceof TFile && (await isCanvasRootedAt(app, legacy, root.id))) {
-    existing = legacy;
-  } else {
-    const prefix = folder ? folder + "/" : "";
-    for (const f of app.vault.getFiles()) {
-      if (f.extension !== "canvas") continue;
-      if (!f.path.startsWith(prefix)) continue;
-      if (f.path.slice(prefix.length).includes("/")) continue; // direct children only
-      if (await isCanvasRootedAt(app, f, root.id)) {
-        existing = f;
-        break;
-      }
+  const prefix = folder ? folder + "/" : "";
+  for (const f of app.vault.getFiles()) {
+    if (f.extension !== "canvas") continue;
+    if (!f.path.startsWith(prefix)) continue;
+    if (f.path.slice(prefix.length).includes("/")) continue; // direct children only
+    if (await isCanvasRootedAt(app, f, root.id)) {
+      // The id path is free — the check above just missed it — so this can't
+      // clobber anything.
+      await app.fileManager.renameFile(f, idPath);
+      return idPath;
     }
   }
-
-  if (existing) {
-    // Follow the rename when the title name is free; otherwise leave the canvas
-    // where it is rather than clobbering the file sitting there.
-    if (!atTitle) {
-      await app.fileManager.renameFile(existing, titlePath);
-      return titlePath;
-    }
-    return existing.path;
-  }
-
-  // Nothing generated yet: take the title name unless it's occupied.
-  return atTitle ? join(`${name} (${root.id})`) : titlePath;
+  return idPath;
 }
 
 /**
@@ -293,8 +247,8 @@ async function resolveCanvasPath(plugin: FiloPlugin, root: Task): Promise<string
  *  - any foreign nodes/edges (ids not starting with "t-"/"e-t-") are left
  *    untouched, so user-added canvas content survives.
  *
- * The file is named after the root task's title (see `resolveCanvasPath`), and
- * the resulting file is returned so callers can open it.
+ * The file is named `<rootId>.canvas` (see `resolveCanvasPath`), and is returned
+ * so callers can open it.
  */
 export async function importTaskTreeToCanvas(
   plugin: FiloPlugin,
@@ -429,32 +383,68 @@ export async function importTaskTreeToCanvas(
 }
 
 /**
- * Build/refresh the task's canvas and show it — what the note's canvas button
- * and the command both do.
+ * Build/refresh the canvas for `taskId`'s tree and show it — what the note's
+ * canvas button and the command both do.
+ *
+ * A tree gets ONE canvas, rooted at its outermost ancestor, so the button works
+ * from any task in it: pressing it on a leaf task opens the same whole-tree
+ * board as pressing it on the root. (The digest goes through
+ * `importTaskTreeToCanvas` directly, since it rebuilds the canvas it was run on
+ * rather than resolving one.)
  */
-export async function openTaskCanvas(plugin: FiloPlugin, rootId: string): Promise<void> {
-  const file = await importTaskTreeToCanvas(plugin, rootId);
+export async function openTaskCanvas(plugin: FiloPlugin, taskId: string): Promise<void> {
+  const root = await plugin.store.getRoot(taskId);
+  if (!root) {
+    new Notice("Filo: no task found to import.");
+    return;
+  }
+  const file = await importTaskTreeToCanvas(plugin, root.id);
   if (file) await revealCanvas(plugin, file);
 }
 
 /**
+ * The leaf already showing `path`, if any.
+ *
+ * Read from the leaf's view *state* rather than `leaf.view.file`: Obsidian
+ * defers restored tabs until they're first activated, and a deferred leaf has
+ * no view file yet — going by the view alone would miss the open canvas and
+ * open a duplicate tab beside it.
+ */
+function findCanvasLeaf(plugin: FiloPlugin, path: string): WorkspaceLeaf | null {
+  for (const leaf of plugin.app.workspace.getLeavesOfType("canvas")) {
+    const state = leaf.getViewState().state as { file?: unknown } | undefined;
+    if (state?.file === path) return leaf;
+  }
+  return null;
+}
+
+/**
  * Focus the canvas, reusing a leaf that already has it open. Such a leaf holds
- * its own in-memory copy of the board, so it's rebuilt to pick up what was just
- * written; otherwise the refresh would be invisible until the file was reopened.
+ * its own in-memory copy of the board, so it's reloaded to pick up what was
+ * just written; otherwise the refresh would be invisible until the file was
+ * reopened.
+ *
+ * The reload is a park-on-empty-then-reopen rather than `leaf.rebuildView()`:
+ * that method is undocumented and blows up on canvas views, which surfaced as
+ * "failed to open task canvas" every time the button was pressed for a board
+ * that was already open.
  */
 export async function revealCanvas(plugin: FiloPlugin, file: TFile): Promise<void> {
-  for (const leaf of plugin.app.workspace.getLeavesOfType("canvas")) {
-    const open = (leaf.view as unknown as { file?: TFile }).file;
-    if (open?.path !== file.path) continue;
-    (leaf as WorkspaceLeaf & { rebuildView?: () => void }).rebuildView?.();
-    plugin.app.workspace.revealLeaf(leaf);
+  const leaf = findCanvasLeaf(plugin, file.path);
+  if (leaf) {
+    await leaf.setViewState({ type: "empty" });
+    await leaf.openFile(file);
+    await plugin.app.workspace.revealLeaf(leaf);
     return;
   }
   // A new tab, so the task note the button was pressed from stays open.
   await plugin.app.workspace.getLeaf("tab").openFile(file);
 }
 
-/** Fuzzy picker used when the command is invoked outside a task file. */
+/**
+ * Fuzzy picker used when the command is invoked outside a task file. Any task
+ * will do — `openTaskCanvas` climbs to the top of its tree.
+ */
 export class TaskPickerModal extends FuzzySuggestModal<Task> {
   private tasks: Task[];
   private onChoose: (task: Task) => void;
@@ -463,7 +453,7 @@ export class TaskPickerModal extends FuzzySuggestModal<Task> {
     super(app);
     this.tasks = tasks;
     this.onChoose = onChoose;
-    this.setPlaceholder("Pick the root task to import…");
+    this.setPlaceholder("Pick a task to open the canvas for…");
   }
 
   getItems(): Task[] {

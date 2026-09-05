@@ -10,7 +10,7 @@ import {
 import type FiloPlugin from "../main";
 import { Task } from "../types";
 import { STATUS_ICON } from "../processors/listProcessor";
-import { taskMtime } from "../store/mtime";
+import { relativeTime, taskMtime } from "../store/mtime";
 
 /**
  * A candidate row: the task plus the mtime of its backing file, which is the
@@ -28,20 +28,6 @@ interface TaskSuggestion {
  * (an empty result set also closes it, this is the belt-and-braces half).
  */
 const MAX_QUERY_LEN = 40;
-
-/** "3m ago" / "2h ago" / "5d ago" — compact recency for the meta line. */
-function relativeTime(ms: number): string {
-  if (!ms) return "";
-  const diff = Date.now() - ms;
-  if (diff < 60_000) return "just now";
-  const mins = Math.floor(diff / 60_000);
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 30) return `${days}d ago`;
-  return new Date(ms).toISOString().slice(0, 10);
-}
 
 /**
  * Wikilink aliases are delimited by `|` and `]]`, so a title containing either
