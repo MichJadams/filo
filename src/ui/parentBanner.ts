@@ -8,13 +8,18 @@ const STATUS_MENU_ICON: Record<Task["status"], string> = {
   undone: "circle",
   "in-progress": "circle-dot",
   done: "check-circle",
+  "wont-do": "ban",
 };
 
-/** Status toggle cycle, matching the t-list row button. */
+/**
+ * Status toggle cycle, matching the t-list row button. `wont-do` is not part of
+ * the cycle — it has its own toggle — but cycling out of it returns to undone.
+ */
 const NEXT_STATUS: Record<Task["status"], Task["status"]> = {
   undone: "in-progress",
   "in-progress": "done",
   done: "undone",
+  "wont-do": "undone",
 };
 
 /** Readable status names for the banner toggle's label and tooltip. */
@@ -22,6 +27,7 @@ const STATUS_LABEL: Record<Task["status"], string> = {
   undone: "Undone",
   "in-progress": "In progress",
   done: "Done",
+  "wont-do": "Won't do",
 };
 
 /** Every status class the toggle can carry, cleared before the current one is set. */
@@ -68,6 +74,7 @@ interface BannerRecord {
   statusEl: HTMLElement;
   statusIconEl: HTMLElement;
   statusTextEl: HTMLElement;
+  wontEl: HTMLElement;
   valueEl: HTMLElement;
   openEl: HTMLElement;
   childrenEl: HTMLElement;
@@ -155,6 +162,12 @@ export class ParentBannerManager {
     const statusTextEl = statusEl.createSpan({ cls: "filo-banner-status-text" });
     statusEl.addEventListener("click", () => void this.cycleStatus(task.id));
 
+    // Won't-do toggle, beside the cycle rather than inside it: abandoning a task
+    // should take a deliberate press, not one extra click while cycling.
+    const wontEl = el.createEl("button", { cls: "filo-banner-wont-do" });
+    setIcon(wontEl, STATUS_MENU_ICON["wont-do"]);
+    wontEl.addEventListener("click", () => void this.toggleWontDo(task.id));
+
     el.createSpan({ cls: "filo-parent-label", text: "Parent" });
 
     // The task id is captured here; current data is re-read at click time so
@@ -181,6 +194,7 @@ export class ParentBannerManager {
       statusEl,
       statusIconEl,
       statusTextEl,
+      wontEl,
       valueEl,
       openEl,
       childrenEl,
@@ -214,6 +228,13 @@ export class ParentBannerManager {
       "aria-label",
       `Status: ${STATUS_LABEL[task.status]} — click to mark ` +
         STATUS_LABEL[NEXT_STATUS[task.status]].toLowerCase()
+    );
+
+    const wont = task.status === "wont-do";
+    rec.wontEl.toggleClass("filo-banner-wont-do-on", wont);
+    rec.wontEl.setAttribute(
+      "aria-label",
+      wont ? "Won't do — click to reopen" : "Mark as won't do"
     );
 
     if (parent) {
@@ -263,6 +284,22 @@ export class ParentBannerManager {
   }
 
   /**
+   * Flip the task in or out of `wont-do`. Read live for the same reason
+   * `cycleStatus` does: a banner that hasn't refreshed yet must not write a
+   * value based on a stale status.
+   */
+  private async toggleWontDo(taskId: string): Promise<void> {
+    const task = await this.plugin.store.getTask(taskId);
+    if (!task) return;
+    try {
+      await this.plugin.store.setStatus(taskId, task.status === "wont-do" ? "undone" : "wont-do");
+    } catch (e) {
+      console.error("[Filo] failed to set status", e);
+      new Notice("Filo: failed to set status");
+    }
+  }
+
+  /**
    * Drop down the task's direct children so a parent note can jump straight
    * into any of them. Children are re-read at click time, and ordered undone
    * first so the still-open work is nearest the cursor.
@@ -278,6 +315,8 @@ export class ParentBannerManager {
       undone: 0,
       "in-progress": 1,
       done: 2,
+      // Abandoned sorts below finished: still worth seeing, least worth acting on.
+      "wont-do": 3,
     };
     const sorted = children
       .slice()

@@ -1,6 +1,6 @@
 import { MarkdownRenderChild, TFile } from "obsidian";
 import type FiloPlugin from "../main";
-import { Task, TaskStatus } from "../types";
+import { Task, TaskStatus, isClosed } from "../types";
 import { applyQuery, ListQuery, parseQuery, resolveWindow, TimeWindow } from "../dsl/filter";
 import { computeTotal, computeTotalInRange, formatDuration } from "../store/timeBlock";
 
@@ -8,12 +8,18 @@ export const STATUS_ICON: Record<TaskStatus, string> = {
   undone: "○",
   "in-progress": "◐",
   done: "●",
+  "wont-do": "⊘",
 };
 
 // Status toggle cycle: undone -> in-progress -> done -> undone.
+//
+// `wont-do` is deliberately NOT in the cycle — it's an outcome you choose, not
+// somewhere you should land by clicking one time too many. It has its own
+// toggle, and cycling out of it returns to undone.
 const NEXT_STATUS: Record<TaskStatus, TaskStatus> = {
   undone: "in-progress",
   "in-progress": "done",
+  "wont-do": "undone",
   done: "undone",
 };
 
@@ -273,6 +279,24 @@ export class ListWidget extends MarkdownRenderChild {
       void this.plugin.store.setStatus(task.id, NEXT_STATUS[task.status]);
     });
 
+    // Won't-do toggle — sits beside the status cycle rather than inside it, so
+    // abandoning a task is always a deliberate press. Pressing it again puts
+    // the task back to undone.
+    const wontBtn = row.createEl("button", {
+      cls: `filo-wont-do${task.status === "wont-do" ? " filo-wont-do-on" : ""}`,
+      text: STATUS_ICON["wont-do"],
+      attr: {
+        "aria-label":
+          task.status === "wont-do" ? "Won't do — click to reopen" : "Mark as won't do",
+      },
+    });
+    wontBtn.addEventListener("click", () => {
+      void this.plugin.store.setStatus(
+        task.id,
+        task.status === "wont-do" ? "undone" : "wont-do"
+      );
+    });
+
     // Add-child button — sits immediately right of the status toggle. Reveals
     // an inline form (rendered below the row) that creates a child of THIS task.
     const childBtn = row.createEl("button", {
@@ -338,7 +362,7 @@ export class ListWidget extends MarkdownRenderChild {
     });
 
     // Due date — highlighted if overdue and not done.
-    const overdue = !!task.due && task.due < today && task.status !== "done";
+    const overdue = !!task.due && task.due < today && !isClosed(task.status);
     row.createDiv({
       cls: "filo-due" + (overdue ? " filo-overdue" : ""),
       text: task.due ?? "",

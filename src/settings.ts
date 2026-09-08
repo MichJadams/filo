@@ -8,12 +8,6 @@ export interface FiloSettings {
   canvasFolder: string;
   /** Running-session safety cap, in hours. */
   timerCapHours: number;
-  /**
-   * How canvas node colors map to tracked time:
-   *  - "relative": normalized to the longest task in the subtree (longest = reddest);
-   *  - "absolute": fixed hour thresholds.
-   */
-  rednessMode: "relative" | "absolute";
   /** When true, recurring tasks are processed automatically on plugin load. */
   processRecurringOnLoad: boolean;
   /** Enables the inline `/t` task-reference autocomplete in the editor. */
@@ -22,7 +16,7 @@ export interface FiloSettings {
   taskLinkTrigger: string;
   /** Maximum rows shown in the task-reference dropdown. */
   taskLinkMaxResults: number;
-  /** When true, completed tasks are omitted from the dropdown. */
+  /** When true, finished tasks (done and won't-do) are omitted from the dropdown. */
   taskLinkHideDone: boolean;
   /** Shows a click-to-change parent banner (by title) at the top of task notes. */
   parentBanner: boolean;
@@ -40,7 +34,6 @@ export const DEFAULT_SETTINGS: FiloSettings = {
   tasksFolder: "tasks",
   canvasFolder: "",
   timerCapHours: 12,
-  rednessMode: "relative",
   processRecurringOnLoad: true,
   taskLinkSuggest: true,
   taskLinkTrigger: "/t",
@@ -108,22 +101,6 @@ export class FiloSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Redness mode")
-      .setDesc(
-        "How tracked time maps to canvas node color. Relative normalizes to the longest task in the subtree."
-      )
-      .addDropdown((d) =>
-        d
-          .addOption("relative", "Relative to subtree")
-          .addOption("absolute", "Absolute thresholds")
-          .setValue(this.plugin.settings.rednessMode)
-          .onChange(async (v) => {
-            this.plugin.settings.rednessMode = v as "relative" | "absolute";
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
       .setName("Process recurring tasks on load")
       .setDesc(
         "Automatically reset due recurring tasks when the plugin loads. You can also run it any time via the \"Load tasks\" command."
@@ -180,7 +157,7 @@ export class FiloSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Hide completed tasks")
-      .setDesc("Omit done tasks from the dropdown.")
+      .setDesc("Omit finished tasks — both done and won't do — from the dropdown.")
       .addToggle((t) =>
         t.setValue(this.plugin.settings.taskLinkHideDone).onChange(async (v) => {
           this.plugin.settings.taskLinkHideDone = v;

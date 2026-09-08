@@ -83,9 +83,9 @@
   gap: 2px;
 }
 .filo-row {
-  /* Columns: status · add-child · title · priority · due · tags · time · timer */
+  /* Columns: status · wont-do · add-child · title · priority · due · tags · time · timer */
   display: grid;
-  grid-template-columns: auto auto 1fr auto auto auto auto auto;
+  grid-template-columns: auto auto auto 1fr auto auto auto auto auto;
   align-items: center;
   gap: 8px;
   padding: 3px 4px;
@@ -103,6 +103,32 @@
 }
 .filo-status-done {
   color: var(--text-success, var(--text-muted));
+}
+.filo-status-wont-do {
+  color: var(--text-faint);
+}
+/* Abandoned reads like done — settled, not outstanding — but greyed, not green. */
+.filo-status-wont-do + .filo-wont-do + .filo-add-child + .filo-title {
+  text-decoration: line-through;
+  color: var(--text-faint);
+}
+/* Dim until hovered or active, so it doesn't compete with the status cycle. */
+.filo-wont-do {
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  font-size: 1.1em;
+  padding: 0 4px;
+  color: var(--text-faint);
+  opacity: 0.35;
+}
+.filo-row:hover .filo-wont-do {
+  opacity: 0.75;
+}
+.filo-wont-do.filo-wont-do-on,
+.filo-row:hover .filo-wont-do.filo-wont-do-on {
+  opacity: 1;
+  color: var(--text-error, var(--text-muted));
 }
 .filo-title {
   cursor: pointer;
@@ -360,7 +386,11 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.filo-suggest-status-done + .filo-suggest-title {
+.filo-suggest-status-wont-do {
+  color: var(--text-faint);
+}
+.filo-suggest-status-done + .filo-suggest-title,
+.filo-suggest-status-wont-do + .filo-suggest-title {
   text-decoration: line-through;
   color: var(--text-muted);
 }
@@ -440,6 +470,28 @@
 }
 .filo-banner-status.filo-banner-status-in-progress {
   color: var(--text-accent);
+}
+.filo-banner-wont-do {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  padding: 2px 4px;
+  color: var(--text-faint);
+  opacity: 0.45;
+  box-shadow: none;
+}
+.filo-parent-banner:hover .filo-banner-wont-do {
+  opacity: 0.8;
+}
+.filo-banner-wont-do.filo-banner-wont-do-on,
+.filo-parent-banner:hover .filo-banner-wont-do.filo-banner-wont-do-on {
+  opacity: 1;
+  color: var(--text-error, var(--text-muted));
+}
+.filo-banner-status.filo-banner-status-wont-do {
+  color: var(--text-faint);
 }
 .filo-banner-status.filo-banner-status-done {
   color: var(--text-success, var(--text-muted));

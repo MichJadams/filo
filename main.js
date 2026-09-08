@@ -34,7 +34,6 @@ var DEFAULT_SETTINGS = {
   tasksFolder: "tasks",
   canvasFolder: "",
   timerCapHours: 12,
-  rednessMode: "relative",
   processRecurringOnLoad: true,
   taskLinkSuggest: true,
   taskLinkTrigger: "/t",
@@ -75,14 +74,6 @@ var FiloSettingTab = class extends import_obsidian.PluginSettingTab {
         }
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Redness mode").setDesc(
-      "How tracked time maps to canvas node color. Relative normalizes to the longest task in the subtree."
-    ).addDropdown(
-      (d) => d.addOption("relative", "Relative to subtree").addOption("absolute", "Absolute thresholds").setValue(this.plugin.settings.rednessMode).onChange(async (v) => {
-        this.plugin.settings.rednessMode = v;
-        await this.plugin.saveSettings();
-      })
-    );
     new import_obsidian.Setting(containerEl).setName("Process recurring tasks on load").setDesc(
       'Automatically reset due recurring tasks when the plugin loads. You can also run it any time via the "Load tasks" command.'
     ).addToggle(
@@ -115,7 +106,7 @@ var FiloSettingTab = class extends import_obsidian.PluginSettingTab {
         }
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Hide completed tasks").setDesc("Omit done tasks from the dropdown.").addToggle(
+    new import_obsidian.Setting(containerEl).setName("Hide completed tasks").setDesc("Omit finished tasks \u2014 both done and won't do \u2014 from the dropdown.").addToggle(
       (t) => t.setValue(this.plugin.settings.taskLinkHideDone).onChange(async (v) => {
         this.plugin.settings.taskLinkHideDone = v;
         await this.plugin.saveSettings();
@@ -410,7 +401,7 @@ function appendLogEntry(content, date, status) {
 
 // src/store/TaskStore.ts
 var FM_RE = /^---\r?\n([\s\S]*?)\r?\n---/;
-var STATUSES = ["undone", "in-progress", "done"];
+var STATUSES = ["undone", "in-progress", "done", "wont-do"];
 function headingLine(title) {
   const flat = (title != null ? title : "").replace(/\s+/g, " ").trim();
   return flat || "Untitled";
@@ -1106,6 +1097,11 @@ var AddWidget = class extends import_obsidian3.MarkdownRenderChild {
 // src/processors/listProcessor.ts
 var import_obsidian4 = require("obsidian");
 
+// src/types.ts
+function isClosed(status) {
+  return status === "done" || status === "wont-do";
+}
+
 // src/dsl/filter.ts
 var DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 function shiftDate(date, days) {
@@ -1158,7 +1154,7 @@ function resolveWindow(spec, today) {
       return { from: spec.from, to: spec.to };
   }
 }
-var STATUSES2 = ["undone", "in-progress", "done"];
+var STATUSES2 = ["undone", "in-progress", "done", "wont-do"];
 var SORT_FIELDS = ["due", "created", "title", "time", "priority"];
 function parseQuery(source) {
   const q = { errors: [] };
@@ -1254,7 +1250,7 @@ function applyQuery(tasks, q, ctx) {
     }
     if (q.due) {
       if (q.due.kind === "overdue") {
-        if (!(t.due && t.due < ctx.today && t.status !== "done"))
+        if (!(t.due && t.due < ctx.today && !isClosed(t.status)))
           return false;
       } else {
         if (!t.due)
@@ -1309,11 +1305,13 @@ function applyQuery(tasks, q, ctx) {
 var STATUS_ICON = {
   undone: "\u25CB",
   "in-progress": "\u25D0",
-  done: "\u25CF"
+  done: "\u25CF",
+  "wont-do": "\u2298"
 };
 var NEXT_STATUS = {
   undone: "in-progress",
   "in-progress": "done",
+  "wont-do": "undone",
   done: "undone"
 };
 function todayStr() {
@@ -1525,6 +1523,19 @@ var ListWidget = class extends import_obsidian4.MarkdownRenderChild {
     statusBtn.addEventListener("click", () => {
       void this.plugin.store.setStatus(task.id, NEXT_STATUS[task.status]);
     });
+    const wontBtn = row.createEl("button", {
+      cls: `filo-wont-do${task.status === "wont-do" ? " filo-wont-do-on" : ""}`,
+      text: STATUS_ICON["wont-do"],
+      attr: {
+        "aria-label": task.status === "wont-do" ? "Won't do \u2014 click to reopen" : "Mark as won't do"
+      }
+    });
+    wontBtn.addEventListener("click", () => {
+      void this.plugin.store.setStatus(
+        task.id,
+        task.status === "wont-do" ? "undone" : "wont-do"
+      );
+    });
     const childBtn = row.createEl("button", {
       cls: "filo-add-child",
       text: "\uFF0B",
@@ -1575,7 +1586,7 @@ var ListWidget = class extends import_obsidian4.MarkdownRenderChild {
         prioEl.blur();
       }
     });
-    const overdue = !!task.due && task.due < today && task.status !== "done";
+    const overdue = !!task.due && task.due < today && !isClosed(task.status);
     row.createDiv({
       cls: "filo-due" + (overdue ? " filo-overdue" : ""),
       text: (_b = task.due) != null ? _b : ""
@@ -1953,25 +1964,16 @@ var NODE_H = 640;
 var LEGACY_SIZES = [[260, 80]];
 var H_GAP = 80;
 var V_GAP = 140;
-var HEAT_RAMP = ["6", "5", "4", "3", "2", "1"];
-var ABS_THRESHOLDS_HOURS = [0.25, 1, 2, 4, 8];
-function colorForTime(ms, maxMs, mode) {
-  if (ms <= 0)
-    return void 0;
-  if (mode === "absolute") {
-    const hours = ms / 36e5;
-    let bucket = 0;
-    for (const t of ABS_THRESHOLDS_HOURS)
-      if (hours >= t)
-        bucket++;
-    return HEAT_RAMP[Math.min(bucket, HEAT_RAMP.length - 1)];
-  }
-  if (maxMs <= 0)
-    return void 0;
-  const r = ms / maxMs;
-  const idx = Math.min(HEAT_RAMP.length - 1, Math.floor(r * HEAT_RAMP.length));
-  return HEAT_RAMP[idx];
-}
+var STATUS_COLOR = {
+  "wont-do": "1",
+  // red
+  done: "4",
+  // green
+  "in-progress": "6",
+  // purple
+  undone: void 0
+  // theme default: gray
+};
 function layoutTree(nodes) {
   var _a;
   const childIds = /* @__PURE__ */ new Map();
@@ -2027,21 +2029,18 @@ async function readCanvas(app, file) {
     return { nodes: [], edges: [] };
   }
 }
-async function isCanvasRootedAt(app, file, rootId) {
+async function treeCardCount(app, file, treeIds) {
   const data = await readCanvas(app, file);
-  if (!data.nodes.some((n) => n.id === rootId))
-    return false;
-  return !data.edges.some(
-    (e) => e.toNode === rootId && String(e.id).startsWith(TASK_EDGE_PREFIX)
-  );
+  return data.nodes.reduce((n, node) => treeIds.has(String(node.id)) ? n + 1 : n, 0);
 }
-async function resolveCanvasPath(plugin, root) {
+async function resolveCanvasPath(plugin, root, treeIds) {
   const app = plugin.app;
   const folder = (0, import_obsidian8.normalizePath)(plugin.settings.canvasFolder || "");
   const idPath = folder ? `${folder}/${root.id}.canvas` : `${root.id}.canvas`;
   if (app.vault.getAbstractFileByPath(idPath) instanceof import_obsidian8.TFile)
     return idPath;
   const prefix = folder ? folder + "/" : "";
+  let best = null;
   for (const f of app.vault.getFiles()) {
     if (f.extension !== "canvas")
       continue;
@@ -2049,11 +2048,12 @@ async function resolveCanvasPath(plugin, root) {
       continue;
     if (f.path.slice(prefix.length).includes("/"))
       continue;
-    if (await isCanvasRootedAt(app, f, root.id)) {
-      await app.fileManager.renameFile(f, idPath);
-      return idPath;
-    }
+    const count = await treeCardCount(app, f, treeIds);
+    if (count > 0 && (!best || count > best.count))
+      best = { file: f, count };
   }
+  if (best)
+    await app.fileManager.renameFile(best.file, idPath);
   return idPath;
 }
 async function importTaskTreeToCanvas(plugin, rootId, target) {
@@ -2063,38 +2063,29 @@ async function importTaskTreeToCanvas(plugin, rootId, target) {
     new import_obsidian8.Notice("Filo: no task found to import.");
     return null;
   }
-  const capMs = plugin.getTimerCapMs();
-  const times = /* @__PURE__ */ new Map();
-  let maxMs = 0;
-  for (const n of nodes) {
-    const ms = computeTotal(n.task.sessions, capMs).ms;
-    times.set(n.task.id, ms);
-    if (ms > maxMs)
-      maxMs = ms;
-  }
   const folder = (0, import_obsidian8.normalizePath)(plugin.settings.canvasFolder || "");
   if (!target && folder && !plugin.app.vault.getAbstractFileByPath(folder)) {
     await plugin.app.vault.createFolder(folder).catch(() => {
     });
   }
-  const canvasPath = target ? target.path : await resolveCanvasPath(plugin, nodes[0].task);
+  const taskIds = new Set(nodes.map((n) => n.task.id));
+  const canvasPath = target ? target.path : await resolveCanvasPath(plugin, nodes[0].task, taskIds);
   const existingFile = target != null ? target : plugin.app.vault.getAbstractFileByPath(canvasPath);
   const existing = existingFile instanceof import_obsidian8.TFile ? await readCanvas(plugin.app, existingFile) : { nodes: [], edges: [] };
   const prevById = new Map(existing.nodes.map((n) => [n.id, n]));
-  const taskIds = new Set(nodes.map((n) => n.task.id));
   const ideal = layoutTree(nodes);
   const prevTaskNodes = nodes.map((n) => prevById.get(n.task.id)).filter((p) => !!p);
   const relayout = prevTaskNodes.length > 0 && prevTaskNodes.every(isLegacySize);
   const taken = relayout ? [] : prevTaskNodes.map((p) => ({ x: p.x, y: p.y }));
   const taskNodes = nodes.map((n) => {
-    var _a, _b;
+    var _a;
     const prev = prevById.get(n.task.id);
-    const color = colorForTime((_a = times.get(n.task.id)) != null ? _a : 0, maxMs, plugin.settings.rednessMode);
+    const color = STATUS_COLOR[n.task.status];
     let at;
     if (prev && !relayout) {
       at = { x: prev.x, y: prev.y };
     } else {
-      at = (_b = ideal.get(n.task.id)) != null ? _b : { x: 0, y: n.depth * (NODE_H + V_GAP) };
+      at = (_a = ideal.get(n.task.id)) != null ? _a : { x: 0, y: n.depth * (NODE_H + V_GAP) };
       while (taken.some((t) => overlaps(at, t)))
         at = { x: at.x, y: at.y + NODE_H + V_GAP };
       taken.push(at);
@@ -2685,7 +2676,7 @@ var TaskLinkSuggest = class extends import_obsidian14.EditorSuggest {
     const match = query ? (0, import_obsidian14.prepareFuzzySearch)(query) : null;
     const out = [];
     for (const task of tasks) {
-      if (this.plugin.settings.taskLinkHideDone && task.status === "done")
+      if (this.plugin.settings.taskLinkHideDone && isClosed(task.status))
         continue;
       if (match && !match(task.title) && !task.tags.some((t) => match(t)))
         continue;
@@ -2824,17 +2815,20 @@ var import_obsidian16 = require("obsidian");
 var STATUS_MENU_ICON = {
   undone: "circle",
   "in-progress": "circle-dot",
-  done: "check-circle"
+  done: "check-circle",
+  "wont-do": "ban"
 };
 var NEXT_STATUS2 = {
   undone: "in-progress",
   "in-progress": "done",
-  done: "undone"
+  done: "undone",
+  "wont-do": "undone"
 };
 var STATUS_LABEL = {
   undone: "Undone",
   "in-progress": "In progress",
-  done: "Done"
+  done: "Done",
+  "wont-do": "Won't do"
 };
 var STATUS_CLASSES = Object.keys(STATUS_LABEL).map(
   (s) => `filo-banner-status-${s}`
@@ -2913,6 +2907,9 @@ var ParentBannerManager = class {
     const statusIconEl = statusEl.createSpan({ cls: "filo-banner-status-icon" });
     const statusTextEl = statusEl.createSpan({ cls: "filo-banner-status-text" });
     statusEl.addEventListener("click", () => void this.cycleStatus(task.id));
+    const wontEl = el.createEl("button", { cls: "filo-banner-wont-do" });
+    (0, import_obsidian16.setIcon)(wontEl, STATUS_MENU_ICON["wont-do"]);
+    wontEl.addEventListener("click", () => void this.toggleWontDo(task.id));
     el.createSpan({ cls: "filo-parent-label", text: "Parent" });
     const valueEl = el.createEl("button", { cls: "filo-parent-value" });
     valueEl.addEventListener("click", () => void this.openPicker(task.id));
@@ -2932,6 +2929,7 @@ var ParentBannerManager = class {
       statusEl,
       statusIconEl,
       statusTextEl,
+      wontEl,
       valueEl,
       openEl,
       childrenEl,
@@ -2954,6 +2952,12 @@ var ParentBannerManager = class {
     rec.statusEl.setAttribute(
       "aria-label",
       `Status: ${STATUS_LABEL[task.status]} \u2014 click to mark ` + STATUS_LABEL[NEXT_STATUS2[task.status]].toLowerCase()
+    );
+    const wont = task.status === "wont-do";
+    rec.wontEl.toggleClass("filo-banner-wont-do-on", wont);
+    rec.wontEl.setAttribute(
+      "aria-label",
+      wont ? "Won't do \u2014 click to reopen" : "Mark as won't do"
     );
     if (parent) {
       rec.valueEl.setText(parent.title);
@@ -2995,6 +2999,22 @@ var ParentBannerManager = class {
     }
   }
   /**
+   * Flip the task in or out of `wont-do`. Read live for the same reason
+   * `cycleStatus` does: a banner that hasn't refreshed yet must not write a
+   * value based on a stale status.
+   */
+  async toggleWontDo(taskId) {
+    const task = await this.plugin.store.getTask(taskId);
+    if (!task)
+      return;
+    try {
+      await this.plugin.store.setStatus(taskId, task.status === "wont-do" ? "undone" : "wont-do");
+    } catch (e) {
+      console.error("[Filo] failed to set status", e);
+      new import_obsidian16.Notice("Filo: failed to set status");
+    }
+  }
+  /**
    * Drop down the task's direct children so a parent note can jump straight
    * into any of them. Children are re-read at click time, and ordered undone
    * first so the still-open work is nearest the cursor.
@@ -3008,7 +3028,9 @@ var ParentBannerManager = class {
     const order = {
       undone: 0,
       "in-progress": 1,
-      done: 2
+      done: 2,
+      // Abandoned sorts below finished: still worth seeing, least worth acting on.
+      "wont-do": 3
     };
     const sorted = children.slice().sort((a, b) => order[a.status] - order[b.status] || a.title.localeCompare(b.title));
     const menu = new import_obsidian16.Menu();

@@ -30,7 +30,7 @@ export interface FiloDataAccess {
 /** Matches the leading YAML frontmatter block. */
 const FM_RE = /^---\r?\n([\s\S]*?)\r?\n---/;
 
-const STATUSES: TaskStatus[] = ["undone", "in-progress", "done"];
+const STATUSES: TaskStatus[] = ["undone", "in-progress", "done", "wont-do"];
 
 /**
  * Flatten a title onto a single line so it can sit after `# ` without the tail

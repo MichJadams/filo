@@ -8,7 +8,7 @@ import {
   prepareFuzzySearch,
 } from "obsidian";
 import type FiloPlugin from "../main";
-import { Task } from "../types";
+import { Task, isClosed } from "../types";
 import { STATUS_ICON } from "../processors/listProcessor";
 import { relativeTime, taskMtime } from "../store/mtime";
 
@@ -86,7 +86,7 @@ export class TaskLinkSuggest extends EditorSuggest<TaskSuggestion> {
 
     const out: TaskSuggestion[] = [];
     for (const task of tasks) {
-      if (this.plugin.settings.taskLinkHideDone && task.status === "done") continue;
+      if (this.plugin.settings.taskLinkHideDone && isClosed(task.status)) continue;
       // Match titles and tags, so `/tapi` finds a task tagged #api.
       if (match && !match(task.title) && !task.tags.some((t) => match(t))) continue;
       out.push({ task, mtime: taskMtime(this.app, task) });

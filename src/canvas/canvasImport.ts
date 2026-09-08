@@ -7,8 +7,7 @@ import {
   normalizePath,
 } from "obsidian";
 import type FiloPlugin from "../main";
-import { SubtreeNode, Task } from "../types";
-import { computeTotal } from "../store/timeBlock";
+import { SubtreeNode, Task, TaskStatus } from "../types";
 
 // --- Canvas JSON shapes (the subset we read/write) -------------------------
 
@@ -53,40 +52,22 @@ const H_GAP = 80; // horizontal gap between siblings
 const V_GAP = 140; // vertical gap between depth rows
 
 /**
- * Obsidian Canvas node colors only support the preset palette "1".."6"; there
- * is NO arbitrary hex. The presets are:
- *   1 red, 2 orange, 3 yellow, 4 green, 5 cyan, 6 purple.
- * To approximate a "cold -> hot" gradient we exploit their rainbow ordering:
- *   purple(6) -> cyan(5) -> green(4) -> yellow(3) -> orange(2) -> red(1).
- * So the most tracked time maps to "1" (red) and the least to "6" (purple).
- * This is a documented approximation, not a true continuous gradient.
+ * Card color per task **status**, using Obsidian's preset palette. The presets
+ * are `"1"` red, `"2"` orange, `"3"` yellow, `"4"` green, `"5"` cyan,
+ * `"6"` purple. (Canvas also accepts a hex string, but a preset is used on
+ * purpose: presets are theme-aware, so the board stays legible in light and
+ * dark, where a fixed hex would only suit one.)
+ *
+ * `undone` maps to no color at all rather than a gray hex — an uncolored card
+ * already renders in the theme's neutral gray, and that gray follows the theme
+ * where a hardcoded one could not.
  */
-const HEAT_RAMP = ["6", "5", "4", "3", "2", "1"];
-
-// Absolute-mode hour thresholds: each crossed threshold bumps to the next
-// (hotter) bucket. 6 buckets -> indices 0..5 into HEAT_RAMP.
-const ABS_THRESHOLDS_HOURS = [0.25, 1, 2, 4, 8];
-
-function colorForTime(
-  ms: number,
-  maxMs: number,
-  mode: "relative" | "absolute"
-): string | undefined {
-  if (ms <= 0) return undefined; // untracked -> leave uncolored
-
-  if (mode === "absolute") {
-    const hours = ms / 3_600_000;
-    let bucket = 0;
-    for (const t of ABS_THRESHOLDS_HOURS) if (hours >= t) bucket++;
-    return HEAT_RAMP[Math.min(bucket, HEAT_RAMP.length - 1)];
-  }
-
-  // relative: normalize to the longest task in this subtree.
-  if (maxMs <= 0) return undefined;
-  const r = ms / maxMs; // 0..1
-  const idx = Math.min(HEAT_RAMP.length - 1, Math.floor(r * HEAT_RAMP.length));
-  return HEAT_RAMP[idx];
-}
+const STATUS_COLOR: Record<TaskStatus, string | undefined> = {
+  "wont-do": "1", // red
+  done: "4", // green
+  "in-progress": "6", // purple
+  undone: undefined, // theme default: gray
+};
 
 // --- Layout -----------------------------------------------------------------
 
@@ -184,19 +165,16 @@ export async function readCanvas(app: App, file: TFile): Promise<CanvasData> {
 }
 
 /**
- * True when `file` is the canvas *rooted at* `rootId`, as opposed to one that
- * merely contains that task as a child node.
- *
- * Every generated parent→child edge is `e-<parent>-<child>`, so the root is the
- * one task node with no incoming task edge. Without this test, a parent task's
- * canvas would be mistaken for its child's.
+ * How many of this tree's tasks have a card on `file`. Zero means the board has
+ * nothing to do with the tree.
  */
-async function isCanvasRootedAt(app: App, file: TFile, rootId: string): Promise<boolean> {
+async function treeCardCount(
+  app: App,
+  file: TFile,
+  treeIds: Set<string>
+): Promise<number> {
   const data = await readCanvas(app, file);
-  if (!data.nodes.some((n) => n.id === rootId)) return false;
-  return !data.edges.some(
-    (e) => e.toNode === rootId && String(e.id).startsWith(TASK_EDGE_PREFIX)
-  );
+  return data.nodes.reduce((n, node) => (treeIds.has(String(node.id)) ? n + 1 : n), 0);
 }
 
 /**
@@ -207,12 +185,23 @@ async function isCanvasRootedAt(app: App, file: TFile, rootId: string): Promise<
  * resolves to the same board with no lookup, renaming a task can't move,
  * orphan or duplicate it, and two tasks sharing a title can't collide.
  *
- * The scan below is a one-time migration off the old title-based naming: a
- * canvas rooted at this task, wherever it sits in the folder, is moved onto the
- * id path so its hand-placed cards survive. Once moved, the direct hit above
- * wins and the scan never runs for that tree again.
+ * The scan below adopts a board that predates that naming. It matches on
+ * **which tree's tasks are on the board**, taking whichever canvas holds the
+ * most of them — deliberately NOT on which task the board is "rooted at".
+ * Boards built before the button climbed to the tree root are rooted at
+ * whatever task they were made from, usually a child, so a rooted-at test
+ * matches nothing and strands the board you actually use behind a newly
+ * created empty one. Most-cards-wins also stops a board that merely borrowed a
+ * card or two from outranking the one built for this tree.
+ *
+ * The adopted board is rebuilt from the whole subtree, so an old partial board
+ * gains the cards it was missing while keeping the positions you set.
  */
-async function resolveCanvasPath(plugin: FiloPlugin, root: Task): Promise<string> {
+async function resolveCanvasPath(
+  plugin: FiloPlugin,
+  root: Task,
+  treeIds: Set<string>
+): Promise<string> {
   const app = plugin.app;
   const folder = normalizePath(plugin.settings.canvasFolder || "");
   const idPath = folder ? `${folder}/${root.id}.canvas` : `${root.id}.canvas`;
@@ -220,17 +209,17 @@ async function resolveCanvasPath(plugin: FiloPlugin, root: Task): Promise<string
   if (app.vault.getAbstractFileByPath(idPath) instanceof TFile) return idPath;
 
   const prefix = folder ? folder + "/" : "";
+  let best: { file: TFile; count: number } | null = null;
   for (const f of app.vault.getFiles()) {
     if (f.extension !== "canvas") continue;
     if (!f.path.startsWith(prefix)) continue;
     if (f.path.slice(prefix.length).includes("/")) continue; // direct children only
-    if (await isCanvasRootedAt(app, f, root.id)) {
-      // The id path is free — the check above just missed it — so this can't
-      // clobber anything.
-      await app.fileManager.renameFile(f, idPath);
-      return idPath;
-    }
+    const count = await treeCardCount(app, f, treeIds);
+    if (count > 0 && (!best || count > best.count)) best = { file: f, count };
   }
+
+  // The id path is free — checked above — so this can't clobber anything.
+  if (best) await app.fileManager.renameFile(best.file, idPath);
   return idPath;
 }
 
@@ -262,17 +251,6 @@ export async function importTaskTreeToCanvas(
     return null;
   }
 
-  const capMs = plugin.getTimerCapMs();
-
-  // Tracked time per task + the subtree max (for relative coloring).
-  const times = new Map<string, number>();
-  let maxMs = 0;
-  for (const n of nodes) {
-    const ms = computeTotal(n.task.sessions, capMs).ms;
-    times.set(n.task.id, ms);
-    if (ms > maxMs) maxMs = ms;
-  }
-
   // `target` pins the file (the digest refreshes the canvas it was run on);
   // otherwise the task's own canvas is resolved by title. The output folder has
   // to exist first, since resolving may rename an existing canvas into it.
@@ -280,7 +258,10 @@ export async function importTaskTreeToCanvas(
   if (!target && folder && !plugin.app.vault.getAbstractFileByPath(folder)) {
     await plugin.app.vault.createFolder(folder).catch(() => {});
   }
-  const canvasPath = target ? target.path : await resolveCanvasPath(plugin, nodes[0].task);
+  const taskIds = new Set(nodes.map((n) => n.task.id));
+  const canvasPath = target
+    ? target.path
+    : await resolveCanvasPath(plugin, nodes[0].task, taskIds);
 
   // Load existing canvas, if any.
   const existingFile = target ?? plugin.app.vault.getAbstractFileByPath(canvasPath);
@@ -290,7 +271,6 @@ export async function importTaskTreeToCanvas(
       : { nodes: [], edges: [] };
 
   const prevById = new Map(existing.nodes.map((n) => [n.id, n]));
-  const taskIds = new Set(nodes.map((n) => n.task.id));
 
   // Ideal tree positions; normally only NEW nodes take theirs, since reused
   // nodes keep wherever the user dragged them.
@@ -311,7 +291,7 @@ export async function importTaskTreeToCanvas(
 
   const taskNodes: CanvasNode[] = nodes.map((n) => {
     const prev = prevById.get(n.task.id);
-    const color = colorForTime(times.get(n.task.id) ?? 0, maxMs, plugin.settings.rednessMode);
+    const color = STATUS_COLOR[n.task.status];
 
     let at: Point;
     if (prev && !relayout) {

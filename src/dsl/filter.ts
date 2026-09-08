@@ -1,4 +1,4 @@
-import { Task, TaskStatus } from "../types";
+import { Task, TaskStatus, isClosed } from "../types";
 
 export type SortField = "due" | "created" | "title" | "time" | "priority";
 
@@ -103,7 +103,7 @@ export interface ListQuery {
   errors: string[];
 }
 
-const STATUSES: string[] = ["undone", "in-progress", "done"];
+const STATUSES: string[] = ["undone", "in-progress", "done", "wont-do"];
 const SORT_FIELDS: string[] = ["due", "created", "title", "time", "priority"];
 
 /**
@@ -232,7 +232,7 @@ export function applyQuery(tasks: Task[], q: ListQuery, ctx: QueryCtx): Task[] {
 
     if (q.due) {
       if (q.due.kind === "overdue") {
-        if (!(t.due && t.due < ctx.today && t.status !== "done")) return false;
+        if (!(t.due && t.due < ctx.today && !isClosed(t.status))) return false;
       } else {
         if (!t.due) return false;
         const cmp = t.due.localeCompare(q.due.date);

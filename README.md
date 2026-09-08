@@ -27,7 +27,7 @@ Each task is a file named `<id>.md` inside the tasks folder (default `tasks/`):
 ---
 id: t-k3p9af2x          # generated stable random id — never derived from title
 title: Write the report
-status: undone          # undone | in-progress | done
+status: undone          # undone | in-progress | done | wont-do
 parent: t-9af2k3p9      # parent task id, or null
 due: 2026-06-30         # YYYY-MM-DD, or null
 tags: [backend, docs]
@@ -70,6 +70,35 @@ Key rules:
 
 Only **one timer runs at a time, globally.** Starting a timer stops any other
 running one. The active task id is persisted, so it's remembered across reloads.
+
+## Task status
+
+Four states: `undone`, `in-progress`, `done`, and `wont-do`.
+
+`done` and `wont-do` are both **closed** — the task is finished with, whether it
+got done or was abandoned. `undone` and `in-progress` are **open**. Everything
+that asks "does this still need attention?" goes by that split rather than by
+`done` alone:
+
+- a task is only **overdue** if it's open and past its due date, so abandoning a
+  task stops it nagging;
+- **Hide completed tasks** hides both kinds of finished from the `/t` dropdown.
+
+### Marking a task won't do
+
+`wont-do` has its **own toggle**, sitting beside the status cycle — in `t-list`
+rows (`⊘`) and in the parent banner (🚫). It is deliberately *not* part of the
+undone → in-progress → done cycle: abandoning a task is an outcome you choose,
+not somewhere you should land by clicking one time too many.
+
+Pressing the toggle on an open task marks it `wont-do`; pressing it again
+reopens the task as `undone`. Cycling the main status button while a task is
+`wont-do` also returns it to `undone`.
+
+It's a first-class status everywhere else too — `status: wont-do` and
+`status: !wont-do` work in the `t-list` DSL, and it shows in task search, the
+`/t` dropdown and the subtask menu (sorted below `done`: still worth seeing,
+least worth acting on).
 
 ## Recurring tasks
 
@@ -295,7 +324,8 @@ By default the list renders as a **nested tree** — children sit indented benea
 their parent, with sibling order following `sort`. A matched task whose parent
 is filtered out becomes a top-level row, so filters never hide a matching child.
 
-Each row shows: a **status toggle** (cycles undone → in-progress → done), the
+Each row shows: a **status toggle** (cycles undone → in-progress → done), a
+**won't-do toggle** (`⊘`) beside it, the
 title (click to open the file), an **editable priority** box, the due date (red
 if overdue), tags, total tracked time, a **Start/Stop** timer button, and a **＋**
 button that reveals an inline form to add a **child task** (parented to that
@@ -417,7 +447,8 @@ Details:
 
 - The trigger only fires at the **start of a line or after a space**, so paths
   and URLs like `notes/tasks` never open it.
-- Each row shows the status glyph (`○` undone, `◐` in-progress, `●` done), the
+- Each row shows the status glyph (`○` undone, `◐` in-progress, `●` done,
+  `⊘` won't do), the
   title, then due date, tags, and how long ago the file was modified.
 - The dropdown closes on `esc`, or as soon as nothing matches what you've typed.
 - Trigger text, result count, and whether done tasks are listed are all
@@ -464,8 +495,8 @@ command palette.
 - **Re-running updates the existing canvas:** nodes are matched by task id,
   **manual positions are preserved**, only new nodes are auto-laid-out (nudged
   down a row if a card you moved is already sitting in their slot), removed
-  tasks are pruned, and colors are refreshed. Foreign (non-Filo) nodes/edges are
-  left untouched.
+  tasks are pruned, and colors are refreshed from each task's current status.
+  Foreign (non-Filo) nodes/edges are left untouched.
 - Cards you resized by hand keep their size. Cards still at a size Filo itself
   generated are bumped to the current default — and a canvas built entirely by
   an older Filo (small cards, left-to-right layout) is **laid out afresh** the
@@ -525,33 +556,46 @@ The trade-off is that the filename isn't human-readable. The board's *tab* still
 shows the id, so if you want to find one in the file explorer, go via the root
 task's canvas button rather than by name.
 
-**Migration.** A canvas from the older title-based naming is picked up the first
-time you open that tree — Filo finds the board rooted at the task, wherever it
-sits in the folder, and moves it onto the id path with its hand-placed cards
+**Adopting an older board.** A canvas that predates this naming is picked up the
+first time you open that tree, moved onto the id path with its hand-placed cards
 intact. After that the direct lookup hits and the scan never runs again.
 
-One exception: a board rooted at a task that is *not* the top of its tree can no
-longer be reached, since the canvas button now always climbs to the root. Those
-are leftovers from before that change and are safe to delete.
+The match is on **which of the tree's tasks have cards on the board** — whichever
+canvas holds the most of them wins — *not* on which task the board is "rooted
+at". Boards made before the button climbed to the tree root are rooted at
+whatever task they were created from, usually a child; matching on the root
+would strand exactly those boards behind a newly created empty one. Taking the
+highest count also stops a board that merely borrowed a card or two from
+outranking the one actually built for the tree.
 
-### Canvas color limitation
+Because the adopted board is then rebuilt from the whole subtree, an old partial
+board *gains* the cards it was missing while keeping the layout you set. Cards
+belonging to a **different** tree are pruned, as on any rebuild — one board per
+tree — and that other tree gets its own board next time you open it.
 
-Obsidian Canvas node colors support **only the preset palette `"1".."6"`**, not
-arbitrary hex:
+### Card colors
 
-```
-1 red   2 orange   3 yellow   4 green   5 cyan   6 purple
-```
+Cards are colored by **task status**:
 
-Filo approximates a "cold → hot" gradient by bucketing tracked time onto the
-rainbow ordering of those presets — `purple(6) → cyan(5) → green(4) →
-yellow(3) → orange(2) → red(1)` — so the **most-tracked task is reddest**. This
-is a documented approximation, not a continuous gradient.
+| Status | Color | Canvas preset |
+| --- | --- | --- |
+| `wont-do` | red | `"1"` |
+| `done` | green | `"4"` |
+| `in-progress` | purple | `"6"` |
+| `undone` | gray | *(no color set)* |
 
-- **Relative mode (default):** time is normalized to the longest task in the
-  subtree, so the longest task is always red.
-- **Absolute mode:** fixed hour thresholds (0.25h / 1h / 2h / 4h / 8h) decide
-  the bucket.
+`undone` is written with **no** `color` key rather than a gray value. An
+uncolored card already renders in the theme's neutral gray, and that gray
+follows the theme where a hardcoded one could not.
+
+The other three use Obsidian's **preset** palette (`"1"`–`"6"`) rather than hex.
+Canvas does accept a hex string, but the presets are theme-aware, so a board
+stays legible in both light and dark mode.
+
+Colors are rewritten on **every** rebuild — opening the canvas from a task, and
+pressing **digest**. So a card changes color as soon as you move the task on,
+and reopening a finished task drops its color key entirely, returning it to
+gray.
 
 ## Slack status
 
@@ -607,7 +651,6 @@ gitignored, but it is not encrypted and it will travel with any vault sync.
 - **Canvas output folder** — where `.canvas` files are written (default: vault
   root).
 - **Timer max duration (hours)** — running-session safety cap (default `12`).
-- **Redness mode** — relative-to-subtree (default) or absolute thresholds.
 - **Process recurring tasks on load** — auto-run the recurring-task reset when
   the plugin loads (default on).
 - **Inline task autocomplete** — enable the `/t` task-reference dropdown

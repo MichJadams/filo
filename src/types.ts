@@ -1,4 +1,16 @@
-export type TaskStatus = "undone" | "in-progress" | "done";
+export type TaskStatus = "undone" | "in-progress" | "done" | "wont-do";
+
+/**
+ * Is the task finished with — whether it got done or was abandoned?
+ *
+ * `done` and `wont-do` are both *closed*; `undone` and `in-progress` are open.
+ * The distinction is what "does this still need attention?" turns on, so
+ * overdue detection and hide-completed both ask this rather than testing for
+ * `done` alone and quietly treating a won't-do task as still outstanding.
+ */
+export function isClosed(status: TaskStatus): boolean {
+  return status === "done" || status === "wont-do";
+}
 
 /**
  * One discrete tracked interval in a task's `t-time` block. `stop === null`
