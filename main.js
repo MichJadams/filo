@@ -26,7 +26,7 @@ __export(main_exports, {
   default: () => FiloPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian19 = require("obsidian");
+var import_obsidian20 = require("obsidian");
 
 // src/settings.ts
 var import_obsidian = require("obsidian");
@@ -2017,6 +2017,11 @@ function sizeFor(prev) {
   }
   return { width: prev.width, height: prev.height };
 }
+var ROOTS_CANVAS_BASENAME = "Active roots";
+function rootsCanvasPath(plugin) {
+  const folder = (0, import_obsidian8.normalizePath)(plugin.settings.canvasFolder || "");
+  return folder ? `${folder}/${ROOTS_CANVAS_BASENAME}.canvas` : `${ROOTS_CANVAS_BASENAME}.canvas`;
+}
 var TASK_EDGE_PREFIX = "e-t-";
 async function readCanvas(app, file) {
   try {
@@ -2040,6 +2045,7 @@ async function resolveCanvasPath(plugin, root, treeIds) {
   if (app.vault.getAbstractFileByPath(idPath) instanceof import_obsidian8.TFile)
     return idPath;
   const prefix = folder ? folder + "/" : "";
+  const rootsPath = rootsCanvasPath(plugin);
   let best = null;
   for (const f of app.vault.getFiles()) {
     if (f.extension !== "canvas")
@@ -2047,6 +2053,8 @@ async function resolveCanvasPath(plugin, root, treeIds) {
     if (!f.path.startsWith(prefix))
       continue;
     if (f.path.slice(prefix.length).includes("/"))
+      continue;
+    if (f.path === rootsPath)
       continue;
     const count = await treeCardCount(app, f, treeIds);
     if (count > 0 && (!best || count > best.count))
@@ -3101,10 +3109,86 @@ var ParentBannerManager = class {
 };
 
 // src/ui/canvasActions.ts
-var import_obsidian18 = require("obsidian");
+var import_obsidian19 = require("obsidian");
+
+// src/canvas/rootsCanvas.ts
+var import_obsidian17 = require("obsidian");
+var COLS = 4;
+function isRootsCanvas(plugin, file) {
+  return file.path === rootsCanvasPath(plugin);
+}
+function openRoots(tasks) {
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  return tasks.filter((t) => (!t.parent || !byId.has(t.parent)) && !isClosed(t.status));
+}
+async function buildRootsCanvas(plugin) {
+  const app = plugin.app;
+  const roots = openRoots(await plugin.store.listTasks());
+  const folder = (0, import_obsidian17.normalizePath)(plugin.settings.canvasFolder || "");
+  if (folder && !app.vault.getAbstractFileByPath(folder)) {
+    await app.vault.createFolder(folder).catch(() => {
+    });
+  }
+  const path = rootsCanvasPath(plugin);
+  const existingFile = app.vault.getAbstractFileByPath(path);
+  const existing = existingFile instanceof import_obsidian17.TFile ? await readCanvas(app, existingFile) : { nodes: [], edges: [] };
+  const prevById = new Map(existing.nodes.map((n) => [n.id, n]));
+  const taken = roots.map((t) => prevById.get(t.id)).filter((p) => !!p).map((p) => ({ x: p.x, y: p.y }));
+  const taskNodes = roots.map((task, i) => {
+    const prev = prevById.get(task.id);
+    let at;
+    if (prev) {
+      at = { x: prev.x, y: prev.y };
+    } else {
+      at = {
+        x: i % COLS * (NODE_W + H_GAP),
+        y: Math.floor(i / COLS) * (NODE_H + V_GAP)
+      };
+      while (taken.some((t) => overlaps(at, t)))
+        at = { x: at.x, y: at.y + NODE_H + V_GAP };
+      taken.push(at);
+    }
+    const node = {
+      ...prev != null ? prev : {},
+      id: task.id,
+      type: "file",
+      file: task.path,
+      // refresh in case the note moved
+      x: at.x,
+      y: at.y,
+      ...sizeFor(prev)
+    };
+    const color = STATUS_COLOR[task.status];
+    if (color)
+      node.color = color;
+    else
+      delete node.color;
+    return node;
+  });
+  const foreignNodes = existing.nodes.filter((n) => !String(n.id).startsWith("t-"));
+  const outNodes = [...foreignNodes, ...taskNodes];
+  const present = new Set(outNodes.map((n) => String(n.id)));
+  const outEdges = existing.edges.filter(
+    (e) => present.has(String(e.fromNode)) && present.has(String(e.toNode))
+  );
+  const json = JSON.stringify({ nodes: outNodes, edges: outEdges }, null, 2);
+  if (existingFile instanceof import_obsidian17.TFile) {
+    await app.vault.modify(existingFile, json);
+    return existingFile;
+  }
+  return app.vault.create(path, json);
+}
+async function openRootsCanvas(plugin) {
+  const file = await buildRootsCanvas(plugin);
+  if (!file) {
+    new import_obsidian17.Notice("Filo: could not build the root tasks board.");
+    return;
+  }
+  await revealCanvas(plugin, file);
+}
 
 // src/canvas/canvasDigest.ts
-var import_obsidian17 = require("obsidian");
+var import_obsidian18 = require("obsidian");
 function sourceFor(plugin, node) {
   var _a, _b;
   if (node.type === "text") {
@@ -3113,7 +3197,7 @@ function sourceFor(plugin, node) {
   }
   if (node.type === "file") {
     const f = plugin.app.vault.getAbstractFileByPath(String((_b = node.file) != null ? _b : ""));
-    if (!(f instanceof import_obsidian17.TFile) || f.extension !== "md")
+    if (!(f instanceof import_obsidian18.TFile) || f.extension !== "md")
       return null;
     return { title: f.basename, body: "", file: f };
   }
@@ -3181,7 +3265,7 @@ async function digestCanvas(plugin, file) {
   await flushCanvasView(plugin, file);
   const canvas = await readCanvas(app, file);
   if (!canvas.nodes.length) {
-    new import_obsidian17.Notice("Filo: this canvas is empty.");
+    new import_obsidian18.Notice("Filo: this canvas is empty.");
     return;
   }
   const tasks = await plugin.store.listTasks();
@@ -3197,9 +3281,10 @@ async function digestCanvas(plugin, file) {
         taskIdOf.set(n.id, known.id);
     }
   }
-  const rootTaskId = findRootTaskId(Array.from(new Set(taskIdOf.values())), byId);
-  if (!rootTaskId) {
-    new import_obsidian17.Notice("Filo: no Filo task on this canvas \u2014 open one from a task note first.");
+  const roots = isRootsCanvas(plugin, file);
+  const rootTaskId = roots ? null : findRootTaskId(Array.from(new Set(taskIdOf.values())), byId);
+  if (!roots && !rootTaskId) {
+    new import_obsidian18.Notice("Filo: no Filo task on this canvas \u2014 open one from a task note first.");
     return;
   }
   const nodeById = new Map(canvas.nodes.map((n) => [n.id, n]));
@@ -3275,14 +3360,14 @@ async function digestCanvas(plugin, file) {
     reparented++;
   }
   if (!createdCount && !adoptedCount && !reparented) {
-    new import_obsidian17.Notice(
+    new import_obsidian18.Notice(
       refused ? "Filo: nothing to digest (an edge would have made a task its own ancestor)." : "Filo: nothing new on this canvas."
     );
-    await rebuild(plugin, rootTaskId, file);
+    await rebuild(plugin, roots ? null : rootTaskId, file);
     return;
   }
   await writeDigestedCanvas(plugin, file, canvas.nodes, canvas.edges, taskIdOf);
-  await rebuild(plugin, rootTaskId, file);
+  await rebuild(plugin, roots ? null : rootTaskId, file);
   const parts = [];
   if (createdCount)
     parts.push(`${createdCount} created`);
@@ -3292,7 +3377,7 @@ async function digestCanvas(plugin, file) {
     parts.push(`${reparented} re-parented`);
   if (refused)
     parts.push(`${refused} skipped (would loop)`);
-  new import_obsidian17.Notice(`Filo: digested canvas \u2014 ${parts.join(", ")}.`);
+  new import_obsidian18.Notice(`Filo: digested canvas \u2014 ${parts.join(", ")}.`);
 }
 async function writeDigestedCanvas(plugin, file, nodes, edges, taskIdOf) {
   const tasks = await plugin.store.listTasks();
@@ -3320,7 +3405,7 @@ async function writeDigestedCanvas(plugin, file, nodes, edges, taskIdOf) {
   );
 }
 async function rebuild(plugin, rootTaskId, file) {
-  const out = await importTaskTreeToCanvas(plugin, rootTaskId, file);
+  const out = rootTaskId ? await importTaskTreeToCanvas(plugin, rootTaskId, file) : await buildRootsCanvas(plugin);
   if (out)
     await revealCanvas(plugin, out);
 }
@@ -3344,7 +3429,7 @@ var CanvasActionManager = class {
     for (const leaf of this.plugin.app.workspace.getLeavesOfType("canvas")) {
       const view = leaf.view;
       const file = view.file;
-      if (!(view instanceof import_obsidian18.ItemView) || !(file instanceof import_obsidian18.TFile))
+      if (!(view instanceof import_obsidian19.ItemView) || !(file instanceof import_obsidian19.TFile))
         continue;
       live.add(leaf);
       let rec = this.records.get(leaf);
@@ -3371,6 +3456,8 @@ var CanvasActionManager = class {
     }
   }
   async isFiloCanvas(file, taskIds) {
+    if (isRootsCanvas(this.plugin, file))
+      return true;
     const hit = this.isFilo.get(file.path);
     if (hit && hit.mtime === file.stat.mtime)
       return hit.value;
@@ -3384,7 +3471,7 @@ var CanvasActionManager = class {
       await digestCanvas(this.plugin, file);
     } catch (e) {
       console.error("[Filo] canvas digest failed", e);
-      new import_obsidian18.Notice("Filo: failed to digest canvas");
+      new import_obsidian19.Notice("Filo: failed to digest canvas");
     }
     await this.update();
   }
@@ -3398,7 +3485,7 @@ var CanvasActionManager = class {
 };
 
 // src/main.ts
-var FiloPlugin = class extends import_obsidian19.Plugin {
+var FiloPlugin = class extends import_obsidian20.Plugin {
   constructor() {
     super(...arguments);
     this.activeTaskId = null;
@@ -3470,6 +3557,11 @@ var FiloPlugin = class extends import_obsidian19.Plugin {
       }
     });
     this.addCommand({
+      id: "open-roots-canvas",
+      name: "Open root tasks canvas",
+      callback: () => void this.runRootsCanvas()
+    });
+    this.addCommand({
       id: "import-task-tree-to-canvas",
       name: "Open task canvas",
       callback: () => void this.runCanvasImport()
@@ -3492,6 +3584,11 @@ var FiloPlugin = class extends import_obsidian19.Plugin {
       callback: () => void this.runProcessRecurring(true)
     });
     this.registerEditorSuggest(new TaskLinkSuggest(this));
+    this.addRibbonIcon(
+      "layout-grid",
+      "Filo: open root tasks canvas",
+      () => void this.runRootsCanvas()
+    );
     this.addSettingTab(new FiloSettingTab(this.app, this));
     this.registerEvent(this.app.workspace.on("file-open", (f) => void this.onFileOpen(f)));
     this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.refreshFileUI()));
@@ -3519,14 +3616,14 @@ var FiloPlugin = class extends import_obsidian19.Plugin {
     try {
       const count = await this.store.processRecurring();
       if (announce) {
-        new import_obsidian19.Notice(
+        new import_obsidian20.Notice(
           count > 0 ? `Filo: reset ${count} recurring task${count === 1 ? "" : "s"}` : "Filo: no recurring tasks due"
         );
       }
     } catch (e) {
       console.error("[Filo] processRecurring failed", e);
       if (announce)
-        new import_obsidian19.Notice("Filo: failed to process recurring tasks");
+        new import_obsidian20.Notice("Filo: failed to process recurring tasks");
     }
   }
   onunload() {
@@ -3547,8 +3644,8 @@ var FiloPlugin = class extends import_obsidian19.Plugin {
   /** Track the last opened task file (for the status-bar fallback) and refresh UI. */
   async onFileOpen(file) {
     this.refreshFileUI();
-    if (file instanceof import_obsidian19.TFile && file.extension === "md") {
-      const folder = (0, import_obsidian19.normalizePath)(this.settings.tasksFolder || "tasks");
+    if (file instanceof import_obsidian20.TFile && file.extension === "md") {
+      const folder = (0, import_obsidian20.normalizePath)(this.settings.tasksFolder || "tasks");
       if (file.path.startsWith(folder + "/")) {
         const task = (await this.store.listTasks()).find((t) => t.path === file.path);
         if (task && task.id !== this.lastTaskId) {
@@ -3584,22 +3681,31 @@ var FiloPlugin = class extends import_obsidian19.Plugin {
   /** Open a task's backing file in the active leaf. */
   async openTaskFile(task) {
     const f = this.app.vault.getAbstractFileByPath(task.path);
-    if (f instanceof import_obsidian19.TFile)
+    if (f instanceof import_obsidian20.TFile)
       await this.app.workspace.getLeaf(false).openFile(f);
   }
   /** Active file's path if it's a markdown file inside the tasks folder, else null. */
   activeTaskFilePath() {
     const f = this.app.workspace.getActiveFile();
-    if (!(f instanceof import_obsidian19.TFile) || f.extension !== "md")
+    if (!(f instanceof import_obsidian20.TFile) || f.extension !== "md")
       return null;
-    const folder = (0, import_obsidian19.normalizePath)(this.settings.tasksFolder || "tasks");
+    const folder = (0, import_obsidian20.normalizePath)(this.settings.tasksFolder || "tasks");
     return f.path.startsWith(folder + "/") ? f.path : null;
+  }
+  /** Refresh and show the root tasks board. */
+  async runRootsCanvas() {
+    try {
+      await openRootsCanvas(this);
+    } catch (e) {
+      console.error("[Filo] failed to open the root tasks canvas", e);
+      new import_obsidian20.Notice("Filo: failed to open the root tasks canvas");
+    }
   }
   /** Open the task-scoped search dialog. */
   async openTaskSearch() {
     const tasks = await this.store.listTasks();
     if (!tasks.length) {
-      new import_obsidian19.Notice("Filo: no tasks to search.");
+      new import_obsidian20.Notice("Filo: no tasks to search.");
       return;
     }
     new TaskSearchModal(this.app, this, tasks).open();
@@ -3628,18 +3734,18 @@ var FiloPlugin = class extends import_obsidian19.Plugin {
   }
   /** The active view's file when it's a canvas, else null. */
   activeCanvasFile() {
-    const view = this.app.workspace.getActiveViewOfType(import_obsidian19.ItemView);
+    const view = this.app.workspace.getActiveViewOfType(import_obsidian20.ItemView);
     const file = this.app.workspace.getActiveFile();
     if (!view || view.getViewType() !== "canvas")
       return null;
-    return file instanceof import_obsidian19.TFile && file.extension === "canvas" ? file : null;
+    return file instanceof import_obsidian20.TFile && file.extension === "canvas" ? file : null;
   }
   async runDigest(file) {
     try {
       await digestCanvas(this, file);
     } catch (e) {
       console.error("[Filo] canvas digest failed", e);
-      new import_obsidian19.Notice("Filo: failed to digest canvas");
+      new import_obsidian20.Notice("Filo: failed to digest canvas");
     }
   }
   async runCanvasImport() {
@@ -3647,7 +3753,7 @@ var FiloPlugin = class extends import_obsidian19.Plugin {
     const active = this.app.workspace.getActiveFile();
     const tasks = await this.store.listTasks();
     let taskId = null;
-    if (active instanceof import_obsidian19.TFile) {
+    if (active instanceof import_obsidian20.TFile) {
       taskId = (_b = (_a = tasks.find((t) => t.path === active.path)) == null ? void 0 : _a.id) != null ? _b : null;
     }
     if (taskId) {
@@ -3655,7 +3761,7 @@ var FiloPlugin = class extends import_obsidian19.Plugin {
       return;
     }
     if (!tasks.length) {
-      new import_obsidian19.Notice("Filo: no tasks to import.");
+      new import_obsidian20.Notice("Filo: no tasks to import.");
       return;
     }
     new TaskPickerModal(this.app, tasks, (t) => void openTaskCanvas(this, t.id)).open();

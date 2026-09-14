@@ -463,6 +463,8 @@ Details:
   active file is a task, with that task pre-selected as the parent.
 - **Filo: Load tasks (process recurring)** — scans recurring tasks and resets any
   whose cadence has elapsed (see **Recurring tasks** above).
+- **Filo: Open root tasks canvas** — the grouping board; see
+  [Root tasks canvas](#root-tasks-canvas). Also in the left ribbon.
 - **Filo: Search tasks** — task-scoped quick switcher; see
   [Searching tasks](#searching-tasks).
 - **Filo: Copy task tree** — only shown in a task file; see
@@ -501,6 +503,45 @@ command palette.
   generated are bumped to the current default — and a canvas built entirely by
   an older Filo (small cards, left-to-right layout) is **laid out afresh** the
   first time it's opened, since the old spacing can't hold the bigger cards.
+
+### Root tasks canvas
+
+**Filo: Open root tasks canvas**, or the grid icon in the left ribbon, opens a
+single board — `Active roots.canvas` — holding one card per **open root task**:
+no parent, and not `done` or `wont-do`. Cards sit in a grid with no edges of
+Filo's own, since roots have no parents to draw to.
+
+It's a **view, rebuilt from the tree every time you open it**, which is the
+point. It's where you group top-level work:
+
+1. Open the board. Say `Piano` and `Arabic` are both roots.
+2. Draw a text card `Dailies`, and an arrow from it to each of them.
+3. Hit **digest** (🌱). `Dailies` becomes a real root task, and `Piano` and
+   `Arabic` become its children.
+4. The board regenerates: `Piano` and `Arabic` are gone — they're no longer
+   roots — leaving `Dailies` in their place.
+
+A root also drops off when you mark it `done` or `wont-do`, so the board stays
+a live workspace rather than an ever-growing list.
+
+What survives a rebuild:
+
+- **positions and sizes** of cards you moved, matched by task id;
+- **foreign nodes and edges** — the text cards and arrows you draw to group
+  things, which is how the board is used before a digest makes them real.
+
+What doesn't: cards for tasks that stopped being open roots, and any edge left
+dangling by their removal.
+
+Two differences from a tree board worth knowing:
+
+- On the roots board a card with **nothing pointing at it** digests into a new
+  **root** task, not a child. On a tree board there's a canvas root to hang it
+  off; here there isn't, which is what makes the board good for sketching out
+  top-level work.
+- The board belongs to no tree, so it is never adopted as one's canvas. Without
+  that exemption it would carry a card for *every* tree and be renamed into the
+  first one's board.
 
 ### Editing tasks from the canvas
 

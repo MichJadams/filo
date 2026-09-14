@@ -1,6 +1,7 @@
 import { ItemView, Notice, TFile, WorkspaceLeaf } from "obsidian";
 import type FiloPlugin from "../main";
 import { readCanvas } from "../canvas/canvasImport";
+import { isRootsCanvas } from "../canvas/rootsCanvas";
 import { digestCanvas } from "../canvas/canvasDigest";
 
 /**
@@ -76,6 +77,10 @@ export class CanvasActionManager {
   }
 
   private async isFiloCanvas(file: TFile, taskIds: Set<string>): Promise<boolean> {
+    // The root tasks board always qualifies, even with no cards on it yet:
+    // an empty one is exactly when you want to draw the first few and digest.
+    if (isRootsCanvas(this.plugin, file)) return true;
+
     const hit = this.isFilo.get(file.path);
     if (hit && hit.mtime === file.stat.mtime) return hit.value;
 

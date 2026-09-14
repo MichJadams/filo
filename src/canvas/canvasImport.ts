@@ -42,14 +42,14 @@ export interface CanvasData {
  * the same measure down — big enough to read a task note at a glance — using
  * ~8px per character at the canvas's default font.
  */
-const NODE_W = 640;
-const NODE_H = 640;
+export const NODE_W = 640;
+export const NODE_H = 640;
 
 /** Card sizes Filo itself used to generate; see `sizeFor`. */
 const LEGACY_SIZES: Array<[number, number]> = [[260, 80]];
 
-const H_GAP = 80; // horizontal gap between siblings
-const V_GAP = 140; // vertical gap between depth rows
+export const H_GAP = 80; // horizontal gap between siblings
+export const V_GAP = 140; // vertical gap between depth rows
 
 /**
  * Card color per task **status**, using Obsidian's preset palette. The presets
@@ -62,7 +62,7 @@ const V_GAP = 140; // vertical gap between depth rows
  * already renders in the theme's neutral gray, and that gray follows the theme
  * where a hardcoded one could not.
  */
-const STATUS_COLOR: Record<TaskStatus, string | undefined> = {
+export const STATUS_COLOR: Record<TaskStatus, string | undefined> = {
   "wont-do": "1", // red
   done: "4", // green
   "in-progress": "6", // purple
@@ -71,7 +71,7 @@ const STATUS_COLOR: Record<TaskStatus, string | undefined> = {
 
 // --- Layout -----------------------------------------------------------------
 
-interface Point {
+export interface Point {
   x: number;
   y: number;
 }
@@ -120,7 +120,7 @@ function layoutTree(nodes: SubtreeNode[]): Map<string, Point> {
 }
 
 /** Do two cards overlap? Touching edges don't count. */
-function overlaps(a: Point, b: Point): boolean {
+export function overlaps(a: Point, b: Point): boolean {
   return (
     a.x < b.x + NODE_W && b.x < a.x + NODE_W && a.y < b.y + NODE_H && b.y < a.y + NODE_H
   );
@@ -136,7 +136,7 @@ function isLegacySize(node: CanvasNode): boolean {
  * current default (so an old canvas picks up the bigger cards), while anything
  * the user resized by hand is left as-is.
  */
-function sizeFor(prev: CanvasNode | undefined): { width: number; height: number } {
+export function sizeFor(prev: CanvasNode | undefined): { width: number; height: number } {
   if (!prev || prev.width === undefined || prev.height === undefined || isLegacySize(prev)) {
     return { width: NODE_W, height: NODE_H };
   }
@@ -144,6 +144,20 @@ function sizeFor(prev: CanvasNode | undefined): { width: number; height: number 
 }
 
 // --- Canvas file naming ----------------------------------------------------
+
+/**
+ * File name of the singleton **root tasks** board (see `rootsCanvas.ts`). It is
+ * a fixed readable name rather than an id, because it belongs to no task.
+ */
+export const ROOTS_CANVAS_BASENAME = "Active roots";
+
+/** Where the root tasks board lives. */
+export function rootsCanvasPath(plugin: FiloPlugin): string {
+  const folder = normalizePath(plugin.settings.canvasFolder || "");
+  return folder
+    ? `${folder}/${ROOTS_CANVAS_BASENAME}.canvas`
+    : `${ROOTS_CANVAS_BASENAME}.canvas`;
+}
 
 /** Prefix of every edge id Filo generates, i.e. the ones it owns and rebuilds. */
 export const TASK_EDGE_PREFIX = "e-t-";
@@ -209,11 +223,16 @@ async function resolveCanvasPath(
   if (app.vault.getAbstractFileByPath(idPath) instanceof TFile) return idPath;
 
   const prefix = folder ? folder + "/" : "";
+  const rootsPath = rootsCanvasPath(plugin);
   let best: { file: TFile; count: number } | null = null;
   for (const f of app.vault.getFiles()) {
     if (f.extension !== "canvas") continue;
     if (!f.path.startsWith(prefix)) continue;
     if (f.path.slice(prefix.length).includes("/")) continue; // direct children only
+    // The roots board carries one card per tree, so it would otherwise look
+    // like a candidate for *every* tree and get renamed into the first one's
+    // board — destroying it. It belongs to no tree and is never adopted.
+    if (f.path === rootsPath) continue;
     const count = await treeCardCount(app, f, treeIds);
     if (count > 0 && (!best || count > best.count)) best = { file: f, count };
   }

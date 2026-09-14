@@ -9,6 +9,7 @@ import {
   readCanvas,
   revealCanvas,
 } from "./canvasImport";
+import { buildRootsCanvas, isRootsCanvas } from "./rootsCanvas";
 
 /**
  * Turning a canvas back into tasks — the inverse of `importTaskTreeToCanvas`,
@@ -160,8 +161,15 @@ export async function digestCanvas(plugin: FiloPlugin, file: TFile): Promise<voi
     }
   }
 
-  const rootTaskId = findRootTaskId(Array.from(new Set(taskIdOf.values())), byId);
-  if (!rootTaskId) {
+  // The root tasks board belongs to no tree, so it has no canvas root to hang
+  // orphan cards off. A card with nothing pointing at it there becomes a new
+  // ROOT task (parent null) rather than a child — which is what makes the board
+  // usable for sketching out top-level work.
+  const roots = isRootsCanvas(plugin, file);
+  const rootTaskId = roots
+    ? null
+    : findRootTaskId(Array.from(new Set(taskIdOf.values())), byId);
+  if (!roots && !rootTaskId) {
     new Notice("Filo: no Filo task on this canvas — open one from a task note first.");
     return;
   }
@@ -262,12 +270,12 @@ export async function digestCanvas(plugin: FiloPlugin, file: TFile): Promise<voi
     );
     // Still rebuild: the tree may have changed elsewhere since this board was
     // last opened.
-    await rebuild(plugin, rootTaskId, file);
+    await rebuild(plugin, roots ? null : (rootTaskId as string), file);
     return;
   }
 
   await writeDigestedCanvas(plugin, file, canvas.nodes, canvas.edges, taskIdOf);
-  await rebuild(plugin, rootTaskId, file);
+  await rebuild(plugin, roots ? null : (rootTaskId as string), file);
 
   const parts: string[] = [];
   if (createdCount) parts.push(`${createdCount} created`);
@@ -319,8 +327,19 @@ async function writeDigestedCanvas(
   );
 }
 
-/** Re-run the normal build over the same file, then show the result. */
-async function rebuild(plugin: FiloPlugin, rootTaskId: string, file: TFile): Promise<void> {
-  const out = await importTaskTreeToCanvas(plugin, rootTaskId, file);
+/**
+ * Re-run the normal build over the same file, then show the result. A null
+ * `rootTaskId` means the root tasks board, which is regenerated from the whole
+ * vault rather than from one subtree — so a card just grouped under another
+ * stops being a root and disappears.
+ */
+async function rebuild(
+  plugin: FiloPlugin,
+  rootTaskId: string | null,
+  file: TFile
+): Promise<void> {
+  const out = rootTaskId
+    ? await importTaskTreeToCanvas(plugin, rootTaskId, file)
+    : await buildRootsCanvas(plugin);
   if (out) await revealCanvas(plugin, out);
 }

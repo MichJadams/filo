@@ -15,6 +15,7 @@ import { ParentBannerManager } from "./ui/parentBanner";
 import { CanvasActionManager } from "./ui/canvasActions";
 import { TaskPickerModal, openTaskCanvas } from "./canvas/canvasImport";
 import { digestCanvas } from "./canvas/canvasDigest";
+import { openRootsCanvas } from "./canvas/rootsCanvas";
 import { clearSlackStatus } from "./slack/slackStatus";
 
 /** Shape persisted via loadData/saveData. */
@@ -126,6 +127,12 @@ export default class FiloPlugin extends Plugin implements FiloDataAccess {
       },
     });
 
+    this.addCommand({
+      id: "open-roots-canvas",
+      name: "Open root tasks canvas",
+      callback: () => void this.runRootsCanvas(),
+    });
+
     // Canvas command. The id is kept from when this was "import task tree to
     // canvas" so existing hotkeys keep working.
     this.addCommand({
@@ -157,6 +164,13 @@ export default class FiloPlugin extends Plugin implements FiloDataAccess {
     // Inline `/t` task-reference autocomplete. Registered unconditionally; the
     // enable setting is checked in onTrigger so toggling it needs no reload.
     this.registerEditorSuggest(new TaskLinkSuggest(this));
+
+    // Ribbon entry for the same thing: the roots board is a place you go back
+    // to, not something you act on from a particular note, so it earns a
+    // permanent spot in the sidebar where the task commands don't.
+    this.addRibbonIcon("layout-grid", "Filo: open root tasks canvas", () =>
+      void this.runRootsCanvas()
+    );
 
     this.addSettingTab(new FiloSettingTab(this.app, this));
 
@@ -272,6 +286,16 @@ export default class FiloPlugin extends Plugin implements FiloDataAccess {
     if (!(f instanceof TFile) || f.extension !== "md") return null;
     const folder = normalizePath(this.settings.tasksFolder || "tasks");
     return f.path.startsWith(folder + "/") ? f.path : null;
+  }
+
+  /** Refresh and show the root tasks board. */
+  private async runRootsCanvas(): Promise<void> {
+    try {
+      await openRootsCanvas(this);
+    } catch (e) {
+      console.error("[Filo] failed to open the root tasks canvas", e);
+      new Notice("Filo: failed to open the root tasks canvas");
+    }
   }
 
   /** Open the task-scoped search dialog. */
