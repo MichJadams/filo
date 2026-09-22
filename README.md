@@ -499,6 +499,11 @@ command palette.
   down a row if a card you moved is already sitting in their slot), removed
   tasks are pruned, and colors are refreshed from each task's current status.
   Foreign (non-Filo) nodes/edges are left untouched.
+- **Connectors you rerouted are preserved too.** An edge is matched by id just
+  like a node, so which sides it attaches to, its color, label and arrow ends
+  all survive a regenerate and a digest. Only the two endpoints are Filo's —
+  a fresh edge starts at bottom → top, and one left stale by a re-parent is
+  removed and redrawn.
 - Cards you resized by hand keep their size. Cards still at a size Filo itself
   generated are bumped to the current default — and a canvas built entirely by
   an older Filo (small cards, left-to-right layout) is **laid out afresh** the

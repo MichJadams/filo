@@ -2,6 +2,7 @@ import { ItemView, Notice, TFile, WorkspaceLeaf } from "obsidian";
 import type FiloPlugin from "../main";
 import { readCanvas } from "../canvas/canvasImport";
 import { isRootsCanvas } from "../canvas/rootsCanvas";
+import { describeError } from "../errors";
 import { digestCanvas } from "../canvas/canvasDigest";
 
 /**
@@ -95,7 +96,7 @@ export class CanvasActionManager {
       await digestCanvas(this.plugin, file);
     } catch (e) {
       console.error("[Filo] canvas digest failed", e);
-      new Notice("Filo: failed to digest canvas");
+      new Notice(`Filo: failed to digest canvas — ${describeError(e)}`);
     }
     // The digest reopens the board, so by now this leaf is on a new view whose
     // header has no button. The workspace events fire during that reload rather

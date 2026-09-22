@@ -15,6 +15,7 @@ import { ParentBannerManager } from "./ui/parentBanner";
 import { CanvasActionManager } from "./ui/canvasActions";
 import { TaskPickerModal, openTaskCanvas } from "./canvas/canvasImport";
 import { digestCanvas } from "./canvas/canvasDigest";
+import { describeError } from "./errors";
 import { openRootsCanvas } from "./canvas/rootsCanvas";
 import { clearSlackStatus } from "./slack/slackStatus";
 
@@ -294,7 +295,7 @@ export default class FiloPlugin extends Plugin implements FiloDataAccess {
       await openRootsCanvas(this);
     } catch (e) {
       console.error("[Filo] failed to open the root tasks canvas", e);
-      new Notice("Filo: failed to open the root tasks canvas");
+      new Notice(`Filo: failed to open the root tasks canvas — ${describeError(e)}`);
     }
   }
 
@@ -342,7 +343,7 @@ export default class FiloPlugin extends Plugin implements FiloDataAccess {
       await digestCanvas(this, file);
     } catch (e) {
       console.error("[Filo] canvas digest failed", e);
-      new Notice("Filo: failed to digest canvas");
+      new Notice(`Filo: failed to digest canvas — ${describeError(e)}`);
     }
   }
 

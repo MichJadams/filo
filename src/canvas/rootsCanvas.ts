@@ -1,4 +1,4 @@
-import { Notice, TFile, normalizePath } from "obsidian";
+import { Notice, TFile } from "obsidian";
 import type FiloPlugin from "../main";
 import { Task, isClosed } from "../types";
 import {
@@ -11,6 +11,7 @@ import {
   Point,
   STATUS_COLOR,
   V_GAP,
+  canvasFolderPath,
   overlaps,
   readCanvas,
   revealCanvas,
@@ -60,7 +61,7 @@ export async function buildRootsCanvas(plugin: FiloPlugin): Promise<TFile | null
   const app = plugin.app;
   const roots = openRoots(await plugin.store.listTasks());
 
-  const folder = normalizePath(plugin.settings.canvasFolder || "");
+  const folder = canvasFolderPath(plugin);
   if (folder && !app.vault.getAbstractFileByPath(folder)) {
     await app.vault.createFolder(folder).catch(() => {});
   }

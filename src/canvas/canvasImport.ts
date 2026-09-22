@@ -151,12 +151,32 @@ export function sizeFor(prev: CanvasNode | undefined): { width: number; height: 
  */
 export const ROOTS_CANVAS_BASENAME = "Active roots";
 
+/**
+ * Path prefix for the canvas output folder: `""` for the vault root, otherwise
+ * `"<folder>/"`.
+ *
+ * Exists because **`normalizePath("")` returns `"/"`, not `""`** — Obsidian
+ * substitutes the root when trimming leaves nothing. A truthiness test on that
+ * result therefore builds `//name.canvas`. `vault.create` normalizes the
+ * duplicate slash away and writes the file at the root, but
+ * `getAbstractFileByPath` does *not* normalize, so the next lookup misses a
+ * file that is really there and the build tries to create it again —
+ * "File already exists", on every open after the first.
+ */
+export function canvasFolderPrefix(plugin: FiloPlugin): string {
+  const folder = normalizePath(plugin.settings.canvasFolder || "");
+  return !folder || folder === "/" ? "" : `${folder}/`;
+}
+
+/** The output folder to ensure exists, or null when canvases go to the root. */
+export function canvasFolderPath(plugin: FiloPlugin): string | null {
+  const prefix = canvasFolderPrefix(plugin);
+  return prefix ? prefix.slice(0, -1) : null;
+}
+
 /** Where the root tasks board lives. */
 export function rootsCanvasPath(plugin: FiloPlugin): string {
-  const folder = normalizePath(plugin.settings.canvasFolder || "");
-  return folder
-    ? `${folder}/${ROOTS_CANVAS_BASENAME}.canvas`
-    : `${ROOTS_CANVAS_BASENAME}.canvas`;
+  return `${canvasFolderPrefix(plugin)}${ROOTS_CANVAS_BASENAME}.canvas`;
 }
 
 /** Prefix of every edge id Filo generates, i.e. the ones it owns and rebuilds. */
@@ -217,12 +237,11 @@ async function resolveCanvasPath(
   treeIds: Set<string>
 ): Promise<string> {
   const app = plugin.app;
-  const folder = normalizePath(plugin.settings.canvasFolder || "");
-  const idPath = folder ? `${folder}/${root.id}.canvas` : `${root.id}.canvas`;
+  const prefix = canvasFolderPrefix(plugin);
+  const idPath = `${prefix}${root.id}.canvas`;
 
   if (app.vault.getAbstractFileByPath(idPath) instanceof TFile) return idPath;
 
-  const prefix = folder ? folder + "/" : "";
   const rootsPath = rootsCanvasPath(plugin);
   let best: { file: TFile; count: number } | null = null;
   for (const f of app.vault.getFiles()) {
@@ -273,7 +292,7 @@ export async function importTaskTreeToCanvas(
   // `target` pins the file (the digest refreshes the canvas it was run on);
   // otherwise the task's own canvas is resolved by title. The output folder has
   // to exist first, since resolving may rename an existing canvas into it.
-  const folder = normalizePath(plugin.settings.canvasFolder || "");
+  const folder = canvasFolderPath(plugin);
   if (!target && folder && !plugin.app.vault.getAbstractFileByPath(folder)) {
     await plugin.app.vault.createFolder(folder).catch(() => {});
   }
@@ -341,15 +360,26 @@ export async function importTaskTreeToCanvas(
   const foreignNodes = existing.nodes.filter((nd) => !String(nd.id).startsWith("t-"));
 
   // Rebuild parent->child edges with deterministic ids (so re-runs dedupe).
+  //
+  // An edge already on the board is REUSED rather than recreated, exactly as a
+  // node is: the id encodes the relationship, so anything else on it — which
+  // sides it attaches to, its color, label, arrow ends — is yours and survives.
+  // Regenerating used to overwrite `fromSide`/`toSide` with bottom/top every
+  // time, snapping every connector you had rerouted back under its parent and
+  // undoing the layout the board was rearranged into.
+  const prevEdgeById = new Map(existing.edges.map((e) => [String(e.id), e]));
   const taskEdges: CanvasEdge[] = [];
   for (const n of nodes) {
     if (n.task.parent && taskIds.has(n.task.parent)) {
+      const id = `e-${n.task.parent}-${n.task.id}`;
+      const prev = prevEdgeById.get(id);
       taskEdges.push({
-        id: `e-${n.task.parent}-${n.task.id}`,
+        // Sides only default for an edge being drawn for the first time.
+        ...(prev ?? { fromSide: "bottom", toSide: "top" }),
+        // The relationship itself is Filo's, and is always authoritative.
+        id,
         fromNode: n.task.parent,
         toNode: n.task.id,
-        fromSide: "bottom",
-        toSide: "top",
       });
     }
   }
@@ -431,10 +461,22 @@ function findCanvasLeaf(plugin: FiloPlugin, path: string): WorkspaceLeaf | null 
 export async function revealCanvas(plugin: FiloPlugin, file: TFile): Promise<void> {
   const leaf = findCanvasLeaf(plugin, file.path);
   if (leaf) {
-    await leaf.setViewState({ type: "empty" });
-    await leaf.openFile(file);
-    await plugin.app.workspace.revealLeaf(leaf);
-    return;
+    // Parking the leaf on an empty view and reopening the file is the
+    // public-API way to force that reload.
+    //
+    // Guarded, because by this point the board is already written to disk: a
+    // reload that fails is a presentation problem, not a failed command, and
+    // reporting it as one sent people hunting for a bug in the build. The
+    // fallback below also makes sure a half-done reload can't strand the leaf
+    // on the empty view it was parked on.
+    try {
+      await leaf.setViewState({ type: "empty" });
+      await leaf.openFile(file);
+      await plugin.app.workspace.revealLeaf(leaf);
+      return;
+    } catch (e) {
+      console.error("[Filo] could not reload the open canvas in place", e);
+    }
   }
   // A new tab, so the task note the button was pressed from stays open.
   await plugin.app.workspace.getLeaf("tab").openFile(file);

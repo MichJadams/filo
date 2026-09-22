@@ -315,11 +315,22 @@ async function writeDigestedCanvas(
       fromNode: taskIdOf.get(e.fromNode) ?? e.fromNode,
       toNode: taskIdOf.get(e.toNode) ?? e.toNode,
     }))
-    // An edge the digest just consumed is replaced by the canonical
-    // `e-t-<parent>-<child>` the rebuild writes; keeping it would double the
+    // An edge you *drew* between two cards is the re-parent gesture; it has
+    // been consumed into frontmatter and is replaced by the canonical
+    // `e-t-<parent>-<child>` the rebuild writes, so keeping it would double the
     // line on screen.
-    .filter((e) => !(taskNodeIds.has(e.fromNode) && taskNodeIds.has(e.toNode)))
-    .filter((e) => !String(e.id).startsWith(TASK_EDGE_PREFIX));
+    //
+    // Canonical edges are kept, though. The rebuild reuses them by id to carry
+    // over the sides and styling you set, and can only do that if it can still
+    // see them — dropping them here reset every connector on the board to
+    // bottom/top after each digest. It replaces the whole `e-t-` set anyway, so
+    // keeping them cannot duplicate a line, and one left stale by a re-parent
+    // is dropped there rather than here.
+    .filter(
+      (e) =>
+        String(e.id).startsWith(TASK_EDGE_PREFIX) ||
+        !(taskNodeIds.has(e.fromNode) && taskNodeIds.has(e.toNode))
+    );
 
   await plugin.app.vault.modify(
     file,

@@ -6,6 +6,7 @@ import { openTaskCanvas } from "../canvas/canvasImport";
 import { postTaskToSlack } from "../slack/slackStatus";
 import { RenameTaskModal } from "../processors/renameTaskModal";
 import { CopyTaskModal } from "../processors/copyTaskModal";
+import { describeError } from "../errors";
 
 /** A task is running if any of its sessions has no stop time. */
 function isRunning(task: Task): boolean {
@@ -238,7 +239,7 @@ export class FileTimerManager {
       await openTaskCanvas(this.plugin, taskId);
     } catch (e) {
       console.error("[Filo] failed to open task canvas", e);
-      new Notice("Filo: failed to open task canvas");
+      new Notice(`Filo: failed to open task canvas — ${describeError(e)}`);
     }
   }
 

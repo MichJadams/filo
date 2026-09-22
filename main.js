@@ -2018,9 +2018,16 @@ function sizeFor(prev) {
   return { width: prev.width, height: prev.height };
 }
 var ROOTS_CANVAS_BASENAME = "Active roots";
-function rootsCanvasPath(plugin) {
+function canvasFolderPrefix(plugin) {
   const folder = (0, import_obsidian8.normalizePath)(plugin.settings.canvasFolder || "");
-  return folder ? `${folder}/${ROOTS_CANVAS_BASENAME}.canvas` : `${ROOTS_CANVAS_BASENAME}.canvas`;
+  return !folder || folder === "/" ? "" : `${folder}/`;
+}
+function canvasFolderPath(plugin) {
+  const prefix = canvasFolderPrefix(plugin);
+  return prefix ? prefix.slice(0, -1) : null;
+}
+function rootsCanvasPath(plugin) {
+  return `${canvasFolderPrefix(plugin)}${ROOTS_CANVAS_BASENAME}.canvas`;
 }
 var TASK_EDGE_PREFIX = "e-t-";
 async function readCanvas(app, file) {
@@ -2040,11 +2047,10 @@ async function treeCardCount(app, file, treeIds) {
 }
 async function resolveCanvasPath(plugin, root, treeIds) {
   const app = plugin.app;
-  const folder = (0, import_obsidian8.normalizePath)(plugin.settings.canvasFolder || "");
-  const idPath = folder ? `${folder}/${root.id}.canvas` : `${root.id}.canvas`;
+  const prefix = canvasFolderPrefix(plugin);
+  const idPath = `${prefix}${root.id}.canvas`;
   if (app.vault.getAbstractFileByPath(idPath) instanceof import_obsidian8.TFile)
     return idPath;
-  const prefix = folder ? folder + "/" : "";
   const rootsPath = rootsCanvasPath(plugin);
   let best = null;
   for (const f of app.vault.getFiles()) {
@@ -2071,7 +2077,7 @@ async function importTaskTreeToCanvas(plugin, rootId, target) {
     new import_obsidian8.Notice("Filo: no task found to import.");
     return null;
   }
-  const folder = (0, import_obsidian8.normalizePath)(plugin.settings.canvasFolder || "");
+  const folder = canvasFolderPath(plugin);
   if (!target && folder && !plugin.app.vault.getAbstractFileByPath(folder)) {
     await plugin.app.vault.createFolder(folder).catch(() => {
     });
@@ -2115,15 +2121,19 @@ async function importTaskTreeToCanvas(plugin, rootId, target) {
     return node;
   });
   const foreignNodes = existing.nodes.filter((nd) => !String(nd.id).startsWith("t-"));
+  const prevEdgeById = new Map(existing.edges.map((e) => [String(e.id), e]));
   const taskEdges = [];
   for (const n of nodes) {
     if (n.task.parent && taskIds.has(n.task.parent)) {
+      const id = `e-${n.task.parent}-${n.task.id}`;
+      const prev = prevEdgeById.get(id);
       taskEdges.push({
-        id: `e-${n.task.parent}-${n.task.id}`,
+        // Sides only default for an edge being drawn for the first time.
+        ...prev != null ? prev : { fromSide: "bottom", toSide: "top" },
+        // The relationship itself is Filo's, and is always authoritative.
+        id,
         fromNode: n.task.parent,
-        toNode: n.task.id,
-        fromSide: "bottom",
-        toSide: "top"
+        toNode: n.task.id
       });
     }
   }
@@ -2169,10 +2179,14 @@ function findCanvasLeaf(plugin, path) {
 async function revealCanvas(plugin, file) {
   const leaf = findCanvasLeaf(plugin, file.path);
   if (leaf) {
-    await leaf.setViewState({ type: "empty" });
-    await leaf.openFile(file);
-    await plugin.app.workspace.revealLeaf(leaf);
-    return;
+    try {
+      await leaf.setViewState({ type: "empty" });
+      await leaf.openFile(file);
+      await plugin.app.workspace.revealLeaf(leaf);
+      return;
+    } catch (e) {
+      console.error("[Filo] could not reload the open canvas in place", e);
+    }
   }
   await plugin.app.workspace.getLeaf("tab").openFile(file);
 }
@@ -2330,6 +2344,14 @@ var RenameTaskModal = class extends import_obsidian10.Modal {
     }
   }
 };
+
+// src/errors.ts
+function describeError(e) {
+  if (e instanceof Error && e.message)
+    return e.message;
+  const s = String(e);
+  return s && s !== "[object Object]" ? s : "unknown error";
+}
 
 // src/ui/fileTimerButton.ts
 function isRunning(task) {
@@ -2521,7 +2543,7 @@ var FileTimerManager = class {
       await openTaskCanvas(this.plugin, taskId);
     } catch (e) {
       console.error("[Filo] failed to open task canvas", e);
-      new import_obsidian11.Notice("Filo: failed to open task canvas");
+      new import_obsidian11.Notice(`Filo: failed to open task canvas \u2014 ${describeError(e)}`);
     }
   }
   refresh(rec, task, hasParent, childCount) {
@@ -3124,7 +3146,7 @@ function openRoots(tasks) {
 async function buildRootsCanvas(plugin) {
   const app = plugin.app;
   const roots = openRoots(await plugin.store.listTasks());
-  const folder = (0, import_obsidian17.normalizePath)(plugin.settings.canvasFolder || "");
+  const folder = canvasFolderPath(plugin);
   if (folder && !app.vault.getAbstractFileByPath(folder)) {
     await app.vault.createFolder(folder).catch(() => {
     });
@@ -3398,7 +3420,9 @@ async function writeDigestedCanvas(plugin, file, nodes, edges, taskIdOf) {
       fromNode: (_a = taskIdOf.get(e.fromNode)) != null ? _a : e.fromNode,
       toNode: (_b = taskIdOf.get(e.toNode)) != null ? _b : e.toNode
     };
-  }).filter((e) => !(taskNodeIds.has(e.fromNode) && taskNodeIds.has(e.toNode))).filter((e) => !String(e.id).startsWith(TASK_EDGE_PREFIX));
+  }).filter(
+    (e) => String(e.id).startsWith(TASK_EDGE_PREFIX) || !(taskNodeIds.has(e.fromNode) && taskNodeIds.has(e.toNode))
+  );
   await plugin.app.vault.modify(
     file,
     JSON.stringify({ nodes: outNodes, edges: outEdges }, null, 2)
@@ -3471,7 +3495,7 @@ var CanvasActionManager = class {
       await digestCanvas(this.plugin, file);
     } catch (e) {
       console.error("[Filo] canvas digest failed", e);
-      new import_obsidian19.Notice("Filo: failed to digest canvas");
+      new import_obsidian19.Notice(`Filo: failed to digest canvas \u2014 ${describeError(e)}`);
     }
     await this.update();
   }
@@ -3698,7 +3722,7 @@ var FiloPlugin = class extends import_obsidian20.Plugin {
       await openRootsCanvas(this);
     } catch (e) {
       console.error("[Filo] failed to open the root tasks canvas", e);
-      new import_obsidian20.Notice("Filo: failed to open the root tasks canvas");
+      new import_obsidian20.Notice(`Filo: failed to open the root tasks canvas \u2014 ${describeError(e)}`);
     }
   }
   /** Open the task-scoped search dialog. */
@@ -3745,7 +3769,7 @@ var FiloPlugin = class extends import_obsidian20.Plugin {
       await digestCanvas(this, file);
     } catch (e) {
       console.error("[Filo] canvas digest failed", e);
-      new import_obsidian20.Notice("Filo: failed to digest canvas");
+      new import_obsidian20.Notice(`Filo: failed to digest canvas \u2014 ${describeError(e)}`);
     }
   }
   async runCanvasImport() {
